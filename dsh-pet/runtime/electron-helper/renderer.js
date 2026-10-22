@@ -135,7 +135,7 @@ function injectAssets() {
   document.head.appendChild(style);
   // 统一右键菜单样式（与浏览器注入同一份 MENU_CSS）
   const menuStyle = document.createElement('style');
-  menuStyle.textContent = S.MENU_CSS;
+  menuStyle.textContent = S.MENU_CSS + S.TASK_PROGRESS_CSS;
   document.head.appendChild(menuStyle);
   // 悬浮提示样式（与浏览器注入同一份 TOOLTIP_CSS；替代原先挂在命中层 title 上的原生提示）
   const tipStyle = document.createElement('style');

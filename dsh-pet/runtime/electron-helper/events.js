@@ -12,7 +12,12 @@
 // 动画循环语义：进行中档位循环播（switchTo once=false），终态档位播一遍回 idle 链；
 //   回空闲时把正在循环的那段改成"播完即停"（见下面空闲分支），否则 ended 永不触发、链回不去。
 PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
-  if (!this.pet.workStatusEnabled) return; // 未启用工作状态联动 -> 该宠物完全免疫（与浏览器一致）
+  const previousMode = this.workProgress?.mode;
+  const sourceChanged = this.workProgress?.sessionId !== snapshot?.progress?.sessionId;
+  this.workProgress = snapshot?.progress;
+  this.syncTaskOffer();
+  const modeChanged = previousMode !== this.workProgress?.mode;
+  if (!this.pet.workStatusEnabled && this.workProgress?.mode !== 'task' && previousMode !== 'task') return; // 未启用工作状态联动 -> 该宠物完全免疫（与浏览器一致）
   if (tick === 0 || tick === this.prevWorkTick) return;
   this.prevWorkTick = tick;
   // 占用锁（issue #122 第 4 项）：锁生效时不响应工作状态——它是**自动**来源（任务事件驱动），
@@ -20,11 +25,16 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
   // applyFreeze 的 resumeWorkStatusAnim() 重新对齐**当前**状态，所以不会停在旧档位上。
   // 宿主侧不挡这个全局段：sections.workStatus 是所有宠物共用一份，宿主"跳过写入"会连带静音
   // 别的宠物（issue #122 要的是"只控制指定 main"），所以按宠物在渲染端忽略。
-  if (this.frozen) return;
-  const state = snapshot && snapshot.state ? snapshot.state : null;
+  if (this.frozen) {
+    if (this.workProgress) this.workState = S.workAnimationState(snapshot);
+    return;
+  }
+  const state =
+    !this.pet.workStatusEnabled && this.workProgress?.mode !== 'task' ? null : S.workAnimationState(snapshot);
   this.workState = state; // 当前工作状态：互动/事件动画播完恢复档位循环用（与浏览器 workStatusRef 同用途）
-  const stateChanged = this.prevWorkState !== state;
-  this.prevWorkState = state;
+  const key = S.workAnimationKey(snapshot);
+  const stateChanged = this.prevWorkState !== key || modeChanged || sourceChanged;
+  this.prevWorkState = key;
   if (!state) {
     // 回空闲：把正在**循环播**的进行中档位动画改成"播完即停"（与浏览器 src/client/pet.ts 的空闲分支
     // 同一处修复）。进行中档位走 switchTo(name, false)（el.loop=true、el.onended=null），ended 永不
@@ -44,6 +54,7 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
     this.workOn = false;
     this.workText = null;
     this.renderBubble();
+    if (!this.dragState.active && (stateChanged || modeChanged || sourceChanged)) this.playIdle();
     return;
   }
   const pool = this.animations.events?.workStatus;
@@ -52,7 +63,7 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
     return;
   }
   const idx = S.WORK_STATUS_INDEX[state];
-  const slot = pool[idx];
+  const slot = S.workAnimationSlot(snapshot, this.animations);
   if (slot === undefined) {
     console.error('[dsh-pet] work-status 档位索引越界：state=' + state + ' idx=' + idx);
     return;
@@ -70,7 +81,7 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
       '] ' +
       name,
   );
-  this.stopMove();
+  if (!this.dragState.active && (stateChanged || !snapshot.progress)) this.stopMove();
   // 气泡文本：任务详情（todo/write 提供）优先，否则从条目级 workStatusTexts[档位]（数组）随机抽一句；
   // 整字段/整档缺失 = 不弹文本，只播动画（与浏览器同一语义）。
   const textGroup = Array.isArray(this.pet.workStatusTexts) ? this.pet.workStatusTexts[idx] : undefined;
@@ -78,7 +89,7 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
     Array.isArray(textGroup) && textGroup.length > 0
       ? textGroup[Math.floor(Math.random() * textGroup.length)]
       : undefined;
-  this.workText = (snapshot && snapshot.task) || configuredText || null;
+  this.workText = S.workStatusText(snapshot, configuredText);
   const terminal = state === 'success' || state === 'error';
   // 气泡点亮/收起只在状态变化时动作：同状态后续 tick（todo 文案更新、其它会话事件搅动 ts）
   // 不重新点亮**已自动收起的终态气泡**——否则"任务完成"的气泡会被后续 ts 变化反复弹回（Bug 2，
@@ -94,11 +105,16 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
       : null; // 非终态：常驻，不设自动收起
   }
   this.renderBubble();
+  if (this.dragState.active || (snapshot.progress && !stateChanged)) return;
   // 循环语义（与浏览器 setOnce 一致）：终态播一遍回 idle；非终态多候选档位播一遍 →
   // ended 由 sprite.handleEnded 轮换到下一候选（长时间状态不单段重复）；非终态单候选档位无限循环。
   const rotating = !terminal && Array.isArray(slot) && slot.length > 1;
   if (terminal || rotating) this.playOnce(name);
-  else this.switchTo(name, false); // 进行中循环播（单动画/单候选档位）
+  else {
+    this.anim = name;
+    this.once = false;
+    this.switchTo(name, false);
+  } // 进行中循环播（单动画/单候选档位）
 };
 
 // ---- 余额事件（自动轮询按 balanceEnabled 门控，手动请求无条件；档位与气泡内容来自 shared） ----
@@ -110,7 +126,7 @@ PetSprite.prototype.onBalanceTick = function onBalanceTick(state, tick, manual) 
   // 占用锁（issue #122 第 4 项）：锁生效时**不看自动余额**（那是宠物自己的行为）；**手动**请求照常
   // （用户右键「查看余额」/ `/balance` 命令——用户交互优先）。判在 tick 消费之后：占用期间这一拍
   // 就当过去了，解冻后不补播（事件是瞬时的）。
-  if (this.frozen && !manual) return;
+  if ((this.frozen || this.workProgress?.mode === 'task') && !manual) return;
   this.showBalanceNow(state, manual);
 };
 
@@ -120,7 +136,7 @@ PetSprite.prototype.onBalanceTick = function onBalanceTick(state, tick, manual) 
 // 门控：自动轮询要求 balanceEnabled；**手动请求无条件弹**（用户问了就该有答复，包括"服务商不支持"这件事）。
 PetSprite.prototype.showBalanceNotice = function showBalanceNotice(state, manual) {
   if (!this.pet.balanceEnabled && !manual) return; // 自动轮询受开关门控；手动无条件通过
-  if (this.frozen && !manual) return; // 占用锁：自动来源不看；手动照常（用户问了就得有答复）
+  if ((this.frozen || this.workProgress?.mode === 'task') && !manual) return; // 占用锁：自动来源不看；手动照常（用户问了就得有答复）
   if (!state || state.ok) return;
   this.bubbleOn = true;
   this.balanceWrap = true; // 文字说明可能多行：renderBubble 据此套用紧凑变体（字号缩到 0.75、宽度下限更窄）
@@ -320,11 +336,14 @@ function applySayLeaf(petId, leaf) {
 }
 
 /** 工作状态叶子 → 各宠物切档位动画 + 气泡（含回到空闲：state=null 用于收起常驻气泡） */
+const workPlayback = new S.WorkStatusPlayback((snapshot) => {
+  workTick++;
+  for (const s of sprites) s.onWorkTick(snapshot, workTick);
+});
 function applyWorkStatusLeaf(leaf) {
   const snap = S.toWorkStatus(leaf.data);
   if (!snap) return;
-  workTick++;
-  for (const s of sprites) s.onWorkTick(snap, workTick);
+  workPlayback.push(snap);
 }
 
 /** 点播动画叶子 → 对应宠物播该动画（其他插件经 POST /anim 写进 S）。
@@ -405,6 +424,8 @@ async function pollStateOnce() {
       stateBaseline = S.flattenCounters(s); // 首拉：只记基线，不渲染（避免启动/重载时重放旧气泡）
       // 第三方菜单项是**当前状态**不是事件：首拉就要装上，否则 helper 重启后要等下次注册才出现
       applyMenuLeaf(s.sections ? s.sections.menu : null);
+      const work = s.sections?.workStatus;
+      if (work?.data?.progress) applyWorkStatusLeaf(work);
       return true;
     }
     for (const change of S.takeChanged(s, stateBaseline)) {

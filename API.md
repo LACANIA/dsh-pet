@@ -14,11 +14,14 @@ dsh-pet 的宿主半侧向 DSH 自己的 Web 服务注册了**一条前缀路由
 | 接口 | 功能 |
 | --- | --- |
 | `GET /dsh-pet-7340/state` | **轮询唯一数据源**：所有状态位都在这里；带 `?since=&timeout=` 可长轮询 |
+| `GET /dsh-pet-7340/work-tracking` | 读实验性任务模式与会话选择，默认关闭；启用方法见[任务进度说明](dsh-pet/scripts/dev/task-progress.md) |
 | `GET /dsh-pet-7340/config` | 读合并后的成品配置（内置默认 + 用户层，字段已填满） |
 | `GET /dsh-pet-7340/config/meta` | 配置文件路径、各类数据落盘位置、卸载该用哪个 profile |
 | `GET /dsh-pet-7340/models` | 可用服务商与模型清单（与 DSH 自己的模型选择器同源） |
 | `GET /dsh-pet-7340/chat?pet=` | 读某只桌宠最近的对话记忆窗口；带 `?rounds=` 可指定本次读取的轮数（0–200，不传用配置的 `chatMemoryRounds`） |
 | `GET /dsh-pet-7340/pose?pet=` | 读**桌面端**宠物的实况（位置 + 朝向）；网页端用客户端服务 `petApi7340`，不走这条路 |
+
+实验性任务进度模式启用后，`POST /dsh-pet-7340/work-tracking` 可提交 `{mode:"idle"|"task"}`、`{sessionId:string|null}` 或 `{offerId:number,accept:boolean}`。模式和来源选择写入 `/state`，过期提示返回 409；功能未启用时 GET/POST 都返回 404。展示元数据位于 `sections.workStatus.data.progress`，完整结构见 `openapi.yaml`。
 
 ## 二、占用锁
 

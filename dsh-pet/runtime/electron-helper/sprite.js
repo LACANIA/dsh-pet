@@ -147,6 +147,8 @@ class PetSprite {
     // 工作状态联动（DSH 会话状态）：容器 1s 轮询 /state 递增 workTick → 本宠物按档位播动画+气泡。
     // 气泡单槽优先级 终态任务 > whisper > balance > 非终态任务（见 renderBubble）；
     // workStatusEnabled 未启用时完全免疫（与浏览器一致）
+    this.taskOffer = null;
+    this.taskOfferKey = '';
     this.workOn = false;
     this.workTimer = null;
     this.workText = null;
@@ -295,6 +297,7 @@ class PetSprite {
   }
 
   dispose() {
+    this.taskOffer?.close();
     this.ac.abort();
     this.inputRegionMutation.disconnect();
     this.inputRegionResize.disconnect();
@@ -612,6 +615,7 @@ class PetSprite {
   applyFreeze(next) {
     if (this.frozen === next) return;
     this.frozen = next;
+    this.syncTaskOffer();
     const el = this.front === 0 ? this.videoA : this.videoB;
     const stamp = '[dsh-pet] ' + new Date().toTimeString().slice(0, 8) + ' pet=' + this.pet.id;
     if (next) {
@@ -670,6 +674,14 @@ class PetSprite {
     // 等持锁者的下一条指令（那走 /anim，不经这里）。与浏览器 pickNext 同一处判断。
     if (this.frozen) return;
     this.stopMove();
+    if (this.workProgress?.mode === 'task') {
+      if (!this.resumeWorkStatusAnim() && this.animations.idle.length) {
+        this.anim = this.animations.idle[0];
+        this.once = false;
+        this.switchTo(this.anim, false);
+      }
+      return;
+    }
     const { animations, animationWeights } = { animations: this.animations, animationWeights: this.weights };
     const roll = Math.random();
     // 宠物固定（pets[].fixedEnabled）：掷骰时把「转向 / 移动」两档权重按 0 算（与浏览器同一份
@@ -715,6 +727,7 @@ class PetSprite {
     // 带 anim 的气泡（默认就是 true），说话动画播完就把工作状态动画点回来，冻结形同虚设。
     // 播放回执已经在上面上报，不受这一行影响。
     if (this.frozen) return;
+    if (this.workProgress?.mode === 'task' && this.resumeWorkStatusAnim()) return;
     const { animations } = { animations: this.animations };
     // 事件动画播完：回 idle（与 drag/clicks 同分支，不进随机链）；气泡由定时器自动消失，与动画解耦
     const isEvent = S.isEventAnim(animations.events, this.anim);
@@ -767,11 +780,11 @@ class PetSprite {
     // this.frozen = false 再调它。
     if (this.frozen) return false;
     const state = this.workState;
+    if (this.workProgress && !this.pet.workStatusEnabled && this.workProgress.mode !== 'task') return false;
     if (!state || state === 'success' || state === 'error') return false;
     const pool = this.animations.events?.workStatus;
     if (!pool || pool.length === 0) return false;
-    const idx = S.WORK_STATUS_INDEX[state];
-    const slot = pool[idx];
+    const slot = S.workAnimationSlot({ state, task: null, progress: this.workProgress }, this.animations);
     if (slot === undefined) return false;
     const name = S.pickSlot(slot, this.anim); // 避开当前正播动画（避免连续重复）
     console.log(
@@ -780,7 +793,11 @@ class PetSprite {
     const rotating = Array.isArray(slot) && slot.length > 1;
     if (rotating)
       this.playOnce(name); // 多候选：播完由 handleEnded 轮换
-    else this.switchTo(name, false); // 单候选：无限循环
+    else {
+      this.anim = name;
+      this.once = false;
+      this.switchTo(name, false);
+    } // 单候选：无限循环
     return true;
   }
 
@@ -1409,7 +1426,7 @@ class PetSprite {
   inputBusy() {
     // 可点的余额气泡是第四个来源：它同样长在窗口里、同样靠窗口级 click 触发，而它悬在宠物头顶的
     // 余量区——那一块平时是穿透的，正需要借 busy + 控件矩形把它"圈"出来（见 syncInputRegions）。
-    return this.dragState.active || this.menuOpen || this.chatOpen || this.balanceClickable();
+    return this.dragState.active || this.menuOpen || this.chatOpen || !!this.taskOffer || this.balanceClickable();
   }
 
   /**
@@ -1440,7 +1457,11 @@ class PetSprite {
     const rects = [];
     // 控件矩形 = 主进程允许接收点击的区域（矩形外的余量区继续穿透）。
     // .pet-bubble.is-clickable 是余额气泡的展开态：它悬在宠物头顶的余量区，不登记就点不到。
-    const controls = [...document.querySelectorAll('.dsh-pet-menu-column, .dsh-pet-chat, .pet-bubble.is-clickable')];
+    const controls = [
+      ...document.querySelectorAll(
+        '.dsh-pet-menu-column, .dsh-pet-chat, .pet-bubble.is-clickable, .dsh-pet-task-offer',
+      ),
+    ];
     for (const el of this.inputRegionElements) {
       if (!controls.includes(el)) {
         this.inputRegionResize.unobserve(el);
@@ -1651,6 +1672,10 @@ class PetSprite {
     // 第三方菜单项统一收在「更多」下（与浏览器端同一份拼装函数）：0 项不出现；
     // 某个 owner 只有 1 项时跳过 owner 那层直接平铺（规则见 shared/menu 的 buildMoreBranch）。
     // 放在整棵动作树之后——「更多」是"别的东西"，不插在工具项和动作之间。
+    const modeMenu = S.taskModeMenu(this.workProgress);
+    const trackingMenu = S.taskTrackingMenu(this.workProgress);
+    if (modeMenu) tools.push(modeMenu);
+    if (trackingMenu) tools.push(trackingMenu);
     const more = S.buildMoreBranch(this.menuItems);
     const tree = tools.concat(S.buildMenuTree(this.animations), more ? [more] : []);
     if (!tree.length) return;
@@ -1682,6 +1707,15 @@ class PetSprite {
   onMenuAction(leaf, keepFacing) {
     this.closeMenu();
     if (!leaf || typeof leaf !== 'object') return;
+    if (leaf.action === 'set-task-mode' || leaf.action === 'track-session') {
+      const body = leaf.action === 'set-task-mode' ? { mode: leaf.taskMode } : { sessionId: leaf.sessionId };
+      S.postAction(BASE + '/work-tracking', body)
+        .then((ok) => {
+          if (!ok) console.warn('[dsh-pet] 任务模式切换失败');
+        })
+        .catch((e) => console.warn('[dsh-pet] 任务模式切换异常', e));
+      return;
+    }
     if (leaf.action === 'third-party') {
       // 第三方菜单项：只把 (owner, label) 交给宿主，具体做什么由注册方自己去查 /menu/events。
       // 带上本窗口的宠物 id——同一条菜单项在不同宠物上被点，注册方要能分辨是哪只。
@@ -1860,7 +1894,34 @@ class PetSprite {
     });
   }
 
+  syncTaskOffer() {
+    const offer = !this.frozen && this.workProgress?.mode === 'idle' ? this.workProgress.offer : null;
+    const key = offer ? JSON.stringify(offer) : '';
+    if (key === this.taskOfferKey) return;
+    this.taskOfferKey = key;
+    this.taskOffer?.close();
+    this.taskOffer = null;
+    if (offer) {
+      this.stopMove();
+      this.taskOffer = S.mountTaskOffer({
+        parent: this.el,
+        offer,
+        baseUrl: BASE + '/work-tracking',
+        onClose: () => {
+          this.taskOffer = null;
+          this.syncInputBusy();
+        },
+      });
+    }
+    this.syncInputBusy();
+  }
+
   renderBubble() {
+    if (this.taskOffer) {
+      this.bubble.classList.remove('is-on');
+      this.syncInputBusy();
+      return;
+    }
     // 气泡单槽：同一时刻只显示一个（优先级：终态任务 > 碎碎念/对话 > 余额 > 非终态任务）。
     // 为什么终态任务不让位：完成/失败气泡只活 10s，被事件顶掉就彻底看不到了；非终态任务气泡
     // 常驻（不设自动收起），让位 10s 零损失。与浏览器 src/client/pet.ts 的单槽优先级同一套。
@@ -1888,6 +1949,10 @@ class PetSprite {
       slot === 'whisper' || slot === 'work' || (slot === 'balance' && this.balanceWrap),
     );
     this.bubble.classList.toggle(S.MEME_BUBBLE_CLASS, !!whisperImg);
+    const taskMode = slot === 'work' && this.workProgress?.mode === 'task';
+    this.bubble.classList.toggle('is-task-progress', taskMode);
+    this.bubble.classList.toggle('is-task-thinking', taskMode && this.workText === '💡');
+    this.bubble.title = taskMode ? this.workProgress.sessionTitle || '' : '';
     // 可点/展开两个状态类：可点 → 气泡参与命中区（见 syncInputRegions）；展开 → 三窗口排版与更宽的盒
     const clickable = slot === 'balance' && this.balanceClickable();
     this.bubble.classList.toggle('is-clickable', clickable);

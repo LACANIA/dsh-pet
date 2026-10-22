@@ -21,6 +21,7 @@ export * from './chat'; // 对话弹窗（menu 之后第二个 DOM 例外：数�
 export * from './physics'; // 拖拽抛掷物理（弹簧跟手 + 甩抛 + 重力反弹）
 export * from './score'; // 点击积分（速度/大小 → 分数，纯逻辑）
 export * from './score-popup'; // 点击积分弹窗 + 粒子爆发（menu/chat 之后第三个 DOM 例外：渲染=两端共用同一份）
+export * from './task-offer';
 export * from './work-status'; // 工作状态联动（DSH 会话事件 → 档位动画/气泡：档位常量 + reducer + 文案，浏览器消费）
 export * from './state'; // 轮询统一状态 S 的客户端侧纯逻辑（拉取 / 拍平 / 比对；两端共用）
 export * from './tooltip'; // 悬浮提示（替代原生 title 属性：class + 样式 + 翻转判据，两端共用同一份）

@@ -10,6 +10,7 @@ import {
   memeImageUrl,
   whisperBubbleView,
 } from '../shared/whisper';
+import { TASK_PROGRESS_CSS } from '../shared/work-status';
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import type * as ReactNS from 'react';
 import type { jsx } from 'react/jsx-runtime';
@@ -98,7 +99,7 @@ function injectBubbleCss(): void {
     const tag = document.createElement('style');
     tag.dataset.plugin = 'dsh-pet';
     tag.dataset.pluginCss = 'dsh-pet/bubble';
-    tag.textContent = bubbleCss;
+    tag.textContent = bubbleCss + TASK_PROGRESS_CSS;
     document.head.appendChild(tag);
   }
 }
@@ -246,7 +247,15 @@ export function makeBalanceBubble(rt: {
  */
 export function makeWhisperBubble(rt: {
   h: typeof jsx;
-}): (props: { text: string; image?: string; url?: string; assetRoot?: string; on: boolean }) => ReactNode {
+}): (props: {
+  text: string;
+  image?: string;
+  url?: string;
+  assetRoot?: string;
+  on: boolean;
+  task?: boolean;
+  title?: string;
+}) => ReactNode {
   const { h } = rt;
   injectBubbleCss();
   injectMemeBubbleCss();
@@ -257,12 +266,16 @@ export function makeWhisperBubble(rt: {
     url,
     assetRoot,
     on,
+    task,
+    title,
   }: {
     text: string;
     image?: string;
     url?: string;
     assetRoot?: string;
     on: boolean;
+    task?: boolean;
+    title?: string;
   }) {
     const rows = whisperBubbleView({ ok: true, text, ts: 0 });
     const key = String(image ?? '').trim();
@@ -272,7 +285,12 @@ export function makeWhisperBubble(rt: {
     // （名字恰好长得像地址时会判错）。
     const src = href || (key ? memeImageUrl(key, '/dsh-pet-7340', assetRoot) : '');
     return h('div', {
-      className: 'dsh-pet-bubble dsh-pet-whisper' + (src ? ' ' + MEME_BUBBLE_CLASS : '') + (on ? ' is-on' : ''),
+      title,
+      className:
+        (task ? 'is-task-progress ' + (text === '💡' ? 'is-task-thinking ' : '') : '') +
+        'dsh-pet-bubble dsh-pet-whisper' +
+        (src ? ' ' + MEME_BUBBLE_CLASS : '') +
+        (on ? ' is-on' : ''),
       children: src
         ? [
             h('img', {

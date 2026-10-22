@@ -147,6 +147,7 @@ import {
   type HostWorkStatusState,
   type WorkStatusTurnContext,
 } from './work-status';
+import { TaskProgressStore, TaskProgressTimeline } from './task-progress';
 import {
   agentErrorFrame,
   hasBlockingActivity,
@@ -375,6 +376,12 @@ export function apply(ctx: any): void {
   // 会话存**——task 曾是全局单值，写过一次就跟着此后所有会话活动一直显示（issue #59）。
   // 进程内内存态：重启回空闲；每次会话事件有实际状态变化才更新（签名比对防刷屏）。
   const workStatus = new WorkStatusStore();
+  // Local prototype: menu modes are exposed only when explicitly enabled for this host.
+  const taskProgress =
+    process.env.DSH_PET_TASK_PROGRESS === '1' || existsSync(join(userRoot, 'task-progress.enabled'))
+      ? new TaskProgressStore()
+      : null;
+  const taskTimeline = new TaskProgressTimeline();
   /** 外部写入槽：固定会话 id，最后写入者生效；不做多写者仲裁/租约/会话管理 */
   const EXTERNAL_WORK_SESSION = 'api';
   let externalWorkSeq = 0;
@@ -408,11 +415,17 @@ export function apply(ctx: any): void {
   let publishedWorkAt = 0;
   let workFlushTimer: ReturnType<typeof setTimeout> | null = null;
   const publishWorkStatus = (): void => {
-    const snap = workStatus.snapshot();
-    const key = String(snap.state) + '\u0000' + String(snap.task);
+    const tracked = taskProgress?.snapshot();
+    const snap =
+      tracked?.progress.mode === 'task'
+        ? tracked
+        : { ...workStatus.snapshot(), ...(tracked ? { progress: tracked.progress } : {}) };
+    const key = tracked
+      ? JSON.stringify({ state: snap.state, task: snap.task, progress: tracked.progress })
+      : String(snap.state) + '\u0000' + String(snap.task);
     if (key === publishedWork) return;
     // 抖动判定：文案没变、且前后都是忙碌档（同档已被上面的 key 短路掉，这里必是互切）
-    const churn = snap.task === publishedTask && isBusyTier(publishedState) && isBusyTier(snap.state);
+    const churn = !tracked && snap.task === publishedTask && isBusyTier(publishedState) && isBusyTier(snap.state);
     const wait = WORK_STATE_GAP_MS - (Date.now() - publishedWorkAt);
     if (churn && wait > 0) {
       // 压住这一拍：到点再取**最新**快照补写（不要在这里缓存 snap——期间可能又变了）
@@ -430,7 +443,15 @@ export function apply(ctx: any): void {
     publishedState = snap.state;
     publishedTask = snap.task;
     publishedWorkAt = Date.now();
-    state.writeSection('workStatus', { state: snap.state, task: snap.task });
+    const published = {
+      state: snap.state,
+      task: snap.task,
+      ...(tracked ? { progress: tracked.progress } : {}),
+    };
+    state.writeSection(
+      'workStatus',
+      tracked ? taskTimeline.capture({ ...published, progress: tracked.progress }) : published,
+    );
   };
   // 占用锁（issue #122 第 4 项「独立动作/气泡占用」）：**内存态**一把锁 + TTL，第三方联动期间
   // 独占这只宠物——除持锁者外谁都动不了它（随机链、碎碎念、余额、工作状态一概让路）。
@@ -603,6 +624,7 @@ export function apply(ctx: any): void {
       const sessionState = workStatus.stateOf(sessionId);
       if (sessionState === 'success' || sessionState === 'error') {
         workStatus.clear(sessionId); // 条目连同它的任务详情文案一起消失，不残留到后续活动
+        taskProgress?.clear(sessionId);
         turnFlags.delete(sessionId);
         publishWorkStatus(); // 清完要写 S：否则前端一直挂着那条陈旧完成态
       }
@@ -745,6 +767,7 @@ export function apply(ctx: any): void {
    *  成功**带回生成的文本**（与同时写进叶子的那份完全相同）——调用方拿到就不必再拉一拍 /state。 */
   const publishWhisper = async (
     petId: string,
+    automatic = false,
   ): Promise<
     | { ok: true; text: string; image?: string }
     | { ok: false; reason: 'provider-missing' | 'generate-error' | 'unknown-pet'; message?: string }
@@ -777,6 +800,7 @@ export function apply(ctx: any): void {
       // 却在边界被吞掉（API.md 描述的降级 reason 正是它）。
       return result;
     }
+    if (automatic && taskProgress?.snapshot().progress.mode === 'task') return { ok: true, text: result.text };
     state.writePet(petId, 'say', result.image ? { text: result.text, image: result.image } : { text: result.text });
     // 文本随返回值带出，且与刚写进叶子的**是同一个变量**：两条出口给同一份文本，不是一个真相两个版本
     return { ok: true, text: result.text, ...(result.image ? { image: result.image } : {}) };
@@ -1520,6 +1544,33 @@ export function apply(ctx: any): void {
     //   DELETE = 清空外部槽回空闲（幂等）
     // 只解决"外部程序把状态告诉桌宠"，不做多写者仲裁/租约/会话管理；
     // 外部槽与 DSH 会话一起参与现有优先级（waiting > error > working > thinking > result > success）。
+    if (rest === 'work-tracking') {
+      if (!taskProgress) return { kind: 'json', status: 404, obj: { error: 'task progress disabled' } };
+      if (method === 'GET') return { kind: 'json', status: 200, obj: taskProgress.snapshot() };
+      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      let value: { sessionId?: unknown; mode?: unknown; offerId?: unknown; accept?: unknown };
+      try {
+        value = JSON.parse(body ?? 'null');
+      } catch {
+        return { kind: 'json', status: 400, obj: { error: 'invalid JSON' } };
+      }
+      if (!value || typeof value !== 'object')
+        return { kind: 'json', status: 400, obj: { error: 'invalid selection' } };
+      if (
+        typeof value.offerId === 'number' &&
+        Number.isSafeInteger(value.offerId) &&
+        typeof value.accept === 'boolean'
+      ) {
+        if (!taskProgress.respondOffer(value.offerId, value.accept))
+          return { kind: 'json', status: 409, obj: { error: 'task offer expired' } };
+      } else if (value.mode === 'idle' || value.mode === 'task') taskProgress.setMode(value.mode);
+      else if (value.sessionId === null || typeof value.sessionId === 'string') {
+        if (!taskProgress.select(value.sessionId))
+          return { kind: 'json', status: 404, obj: { error: 'unknown session' } };
+      } else return { kind: 'json', status: 400, obj: { error: 'expected mode or sessionId' } };
+      publishWorkStatus();
+      return { kind: 'json', status: 200, obj: { ok: true } };
+    }
     if (rest === 'work-status') {
       if (method === 'DELETE') {
         if (workStatus.clear(EXTERNAL_WORK_SESSION)) publishWorkStatus();
@@ -2282,6 +2333,7 @@ export function apply(ctx: any): void {
   // 纯监听不调用模型；有宠物启用 workStatusEnabled 时才被浏览器侧消费（host 侧恒轻量监听）。
   ctx.effect(() => {
     const dispose = ctx.on('session/event', (session: unknown, event: unknown) => {
+      if (taskProgress?.accept(session, event)) publishWorkStatus();
       const type = (event as { type?: string } | null)?.type;
       if (!type) return;
       const sessionId = String(
@@ -2365,6 +2417,16 @@ export function apply(ctx: any): void {
       terminalTimers.clear();
     };
   }, 'dsh-pet: work-status session events');
+  if (taskProgress) {
+    publishWorkStatus();
+    ctx.effect(() => {
+      const timer = setInterval(() => {
+        if (taskProgress.isTaskMode()) publishWorkStatus();
+      }, 500);
+      timer.unref?.();
+      return () => clearInterval(timer);
+    }, 'dsh-pet: compact task activity expiry');
+  }
 
   // 系统通知：监听 DSH 宿主事件 → 生成通知帧入队（浏览器轮询 /state 读到后弹 toast）。
   // 与 work-status 同一 session/event 源，但职责各自独立（通知帧 = 事件 → toast 的一对一映射，
@@ -2499,10 +2561,10 @@ export function apply(ctx: any): void {
           // 宿主侧只挡这一处 **per-pet** 来源；两个**全局段**（balance / workStatus）不在这里挡——
           // 它们所有宠物共用一份，宿主"跳过写入"会连带静音别的宠物；那两处由渲染端按宠物忽略
           // （见 src/client/pet.ts 的冻结判定），代价是叶子照常推进、渲染端自己不看。
-          if (lock.locked(petId)) continue;
+          if (lock.locked(petId) || taskProgress?.snapshot().progress.mode === 'task') continue;
           lastWhisperAt.set(petId, now);
           // 不 await：生成要几秒，别把调度拍拖住（每只宠物独立生成，互不阻塞）
-          void publishWhisper(petId).catch(() => {});
+          void publishWhisper(petId, true).catch(() => {});
         }
         if (Number.isFinite(min)) next = min;
       } catch {

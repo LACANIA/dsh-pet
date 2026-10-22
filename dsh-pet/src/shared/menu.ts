@@ -23,6 +23,7 @@
 //   不再使用"逐项 mouseleave 延迟关闭定时器"——旧实现里鼠标从分类项移向三级面板时，
 //   会同时给父项（动作）排下无人取消的关闭定时器，导致二级+三级一起消失。
 import type { Animations, Category, PetDisplay } from './types';
+import type { TaskProgress } from './work-status';
 
 /** 叶子：可点击的菜单项 */
 export interface MenuLeaf {
@@ -37,7 +38,19 @@ export interface MenuLeaf {
    * third-party=第三方注册的菜单项（见 buildMoreBranch）——点击只把 (owner, label) 上报给宿主，
    * 具体做什么由注册方自己决定。
    * 手动触发均不受 whisperEnabled 影响（该字段只关自动周期轮询） */
-  action?: 'open-site' | 'show-balance' | 'whisper' | 'chat' | 'home' | 'reload' | 'set-display' | 'third-party';
+  action?:
+    | 'open-site'
+    | 'show-balance'
+    | 'whisper'
+    | 'chat'
+    | 'home'
+    | 'reload'
+    | 'set-display'
+    | 'third-party'
+    | 'track-session'
+    | 'set-task-mode';
+  sessionId?: string | null;
+  taskMode?: 'idle' | 'task';
   /** set-display 的目标显示位置（与设置页「显示位置」下拉框同一套取值） */
   display?: PetDisplay;
   /** third-party：注册它的 owner（身份键，**只用于回传，不显示**）。同一个 owner 的项收在同一个
@@ -55,6 +68,39 @@ export interface MenuBranch {
 }
 
 export type MenuNode = MenuLeaf | MenuBranch;
+
+export function taskTrackingMenu(progress?: TaskProgress): MenuBranch | null {
+  if (progress?.mode !== 'task') return null;
+  return {
+    label: '跟踪任务',
+    children: [
+      {
+        label: '自动选择',
+        action: 'track-session',
+        sessionId: null,
+        hint: progress.pinnedSessionId === null ? '✓' : '',
+      },
+      ...progress.sessions.map((s) => ({
+        label: s.title,
+        action: 'track-session' as const,
+        sessionId: s.id,
+        hint: progress.pinnedSessionId === s.id ? '✓' : s.state === null ? '空闲' : '',
+      })),
+    ],
+  };
+}
+
+export function taskModeMenu(progress?: TaskProgress): MenuBranch | null {
+  return progress
+    ? {
+        label: '运行模式',
+        children: [
+          { label: '挂机模式', action: 'set-task-mode', taskMode: 'idle', hint: progress.mode === 'idle' ? '✓' : '' },
+          { label: '任务模式', action: 'set-task-mode', taskMode: 'task', hint: progress.mode === 'task' ? '✓' : '' },
+        ],
+      }
+    : null;
+}
 
 /**
  * 「显示位置」子菜单 —— 桌面端与浏览器端注入**同一份**（文案与设置页「显示位置」下拉框一致）。

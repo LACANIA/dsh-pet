@@ -210,6 +210,78 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /dsh-pet-7340/work-tracking:
+    get:
+      tags: [State]
+      operationId: getWorkTracking
+      summary: 读取实验性任务进度模式及会话选择
+      description: |
+        仅在宿主设置 `DSH_PET_TASK_PROGRESS=1`，或用户数据目录中存在
+        `dsh-pet/task-progress.enabled` 时启用。未启用时返回 404。
+        返回当前内存中的跟踪状态；前端展示仍从 `/state` 消费。
+      responses:
+        "200":
+          description: 当前任务状态及进度元数据；此直接读取不包含展示时间线。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkStatusSnapshot"
+        "404":
+          description: 实验功能未启用。
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+    post:
+      tags: [Action]
+      operationId: selectWorkTracking
+      summary: 切换任务模式、跟踪会话或响应新任务提示
+      description: |
+        功能默认关闭，未启用时返回 404。每次提交一种选择；优先处理合法的提示响应，
+        然后是模式选择，最后是会话选择。成功写入 `/state`，各宠物使用同一选择。
+        `sessionId: null` 选择自动跟踪；选定会话后保持该来源，直到任务结束或再次选择。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              anyOf:
+                - type: object
+                  required: [mode]
+                  properties:
+                    mode:
+                      type: string
+                      enum: [idle, task]
+                - type: object
+                  required: [sessionId]
+                  properties:
+                    sessionId:
+                      type: [string, "null"]
+                - type: object
+                  required: [offerId, accept]
+                  properties:
+                    offerId:
+                      type: integer
+                    accept:
+                      type: boolean
+      responses:
+        "200":
+          description: '选择已接受，返回 `{ ok: true }`。'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    const: true
+        "400":
+          description: JSON 或选择参数非法。
+        "404":
+          description: 实验功能未启用，或选择的会话不存在。
+        "409":
+          description: 任务提示已经失效；客户端应读取最新状态。
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
   /dsh-pet-7340/work-status:
     post:
       tags: [Action]
@@ -2686,6 +2758,92 @@ components:
           oneOf:
             - type: string
             - type: "null"
+        progress:
+          $ref: "#/components/schemas/TaskProgressSnapshot"
+
+    TaskProgressBase:
+      type: object
+      description: 仅启用实验性任务进度模式后提供；全部为宿主进程内状态。
+      required: [mode, summary, action, offer, sessionId, sessionTitle, pinnedSessionId, sessions]
+      properties:
+        mode:
+          type: string
+          enum: [idle, task]
+        summary:
+          type: [string, "null"]
+          description: 最近三秒的简短工具活动摘要，不包含完整工具参数或输出。
+        action:
+          type: [string, "null"]
+          enum: [typing, viewing, working, null]
+          description: 当前或摘要保留期间的动作类别；摘要过期后清空。
+        offer:
+          oneOf:
+            - type: object
+              required: [id, sessionId, title, pending]
+              properties:
+                id:
+                  type: integer
+                sessionId:
+                  type: string
+                title:
+                  type: string
+                pending:
+                  type: integer
+                  minimum: 1
+                  maximum: 32
+            - type: "null"
+        sessionId:
+          type: [string, "null"]
+        sessionTitle:
+          type: [string, "null"]
+        pinnedSessionId:
+          type: [string, "null"]
+        sessions:
+          type: array
+          maxItems: 32
+          items:
+            type: object
+            required: [id, title, state]
+            properties:
+              id:
+                type: string
+              title:
+                type: string
+              state:
+                $ref: "#/components/schemas/WorkStatusSnapshot/properties/state"
+
+    TaskProgressSnapshot:
+      allOf:
+        - $ref: "#/components/schemas/TaskProgressBase"
+        - type: object
+          properties:
+            timeline:
+              type: object
+              description: |
+                仅 `/state` 中提供，前端按记录时间延后约 300 毫秒展示，并过滤不足
+                300 毫秒的连续思考区间。切换会话来源时 stream 改变，取消旧来源待播记录。
+              required: [stream, frames]
+              properties:
+                stream:
+                  type: string
+                frames:
+                  type: array
+                  maxItems: 256
+                  items:
+                    type: object
+                    required: [seq, at, state, task, progress]
+                    properties:
+                      seq:
+                        type: integer
+                      at:
+                        type: number
+                        description: 宿主记录时间，Unix 毫秒。
+                      state:
+                        $ref: "#/components/schemas/WorkStatusSnapshot/properties/state"
+                      task:
+                        type: [string, "null"]
+                      progress:
+                        $ref: "#/components/schemas/TaskProgressBase"
 
     NotifyLeaf:
       type: object
