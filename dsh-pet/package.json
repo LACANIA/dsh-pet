@@ -78,7 +78,7 @@
     "ensure:electron": "node scripts/ensure-electron.mjs",
     "start:desktop": "node scripts/start-desktop.mjs",
     "standalone": "node lib/standalone.js",
-    "dev:mock": "node scripts/dev/mock-server.mjs",
+    "dev:mock": "node --experimental-strip-types scripts/dev/mock-server.mjs",
     "build": "node scripts/prepare.js",
     "prepack": "npm run build && npm run typecheck && npm run lint && npm run format:check && node scripts/prepack-check.js && npm run check:openapi",
     "check:openapi": "node scripts/check-openapi.mjs",

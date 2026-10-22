@@ -7,7 +7,7 @@
  *
  * 环境变量（与宿主拉起时一致）：
  *   DSH_PET_CONFIG_URL / DSH_PET_SCALE / DSH_PET_ELECTRON_PATH
- * 其余端点（thumb/balance/trigger/notify/pic/font）由 renderer 从 configUrl 推导。
+ * 其余端点（state/balance/thumb/pic/font）由 renderer 从 configUrl 推导。
  *
  * 示例（对着一台已跑 dsh web 的机器）：
  *   node scripts/start-desktop.mjs http://127.0.0.1:3080/dsh-pet-7340/config
