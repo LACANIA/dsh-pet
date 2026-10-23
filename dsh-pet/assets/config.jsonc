@@ -204,6 +204,9 @@
       // 余额/碎碎念/工作状态事件动画、点击回应与拖拽一律照常——用户主动触发的不受此限制。
       // 设置页有同名勾选框。改动后刷新或重启生效。
       "fixedEnabled": false,
+      // 拖拽惯性抛射：默认 true；false = 直接跟随鼠标，松手原地停下。
+      // 同时取消鼠标双击拖拽弹弓；点击回应、接口抛掷与自主移动不受影响。
+      "dragPhysicsEnabled": true,
       "display": "both",
       "position": {
         "corner": "top-right",

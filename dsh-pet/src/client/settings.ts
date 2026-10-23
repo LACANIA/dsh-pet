@@ -237,6 +237,9 @@ export const zh = {
   fixedEnabled: '宠物固定',
   fixedEnabledHint:
     '启用后随机动画不再让宠物自己转向或走开，只播原地待机与随机小动作；右键菜单点播、接口触发、余额/碎碎念/工作状态动画不受影响。',
+  dragPhysicsEnabled: '拖拽惯性抛射',
+  dragPhysicsEnabledHint:
+    '默认开启，拖拽时有弹簧跟随，松手可甩抛、反弹或触发双击拖拽弹弓。关闭后直接跟随鼠标，松手原地停下；点击回应、接口抛掷和自主移动照常。',
   displayLabel: '显示位置',
   displayHint: 'web=仅浏览器 / desktop=仅桌面 / both=两者都显示 / none=都不显示',
   'display.web': '仅浏览器',
@@ -418,6 +421,9 @@ export const en = {
   fixedEnabled: 'Pin in place',
   fixedEnabledHint:
     'When enabled, the random chain no longer turns this pet or walks it away — only idle and in-place actions play. Right-click picks, API triggers and balance / whisper / work-status animations are unaffected.',
+  dragPhysicsEnabled: 'Drag inertia',
+  dragPhysicsEnabledHint:
+    'On by default: spring following, release inertia, bouncing and double-drag slingshots. Turn off for direct dragging that stops on release. Click responses, API throws and autonomous movement still work.',
   displayLabel: 'Display',
   displayHint: 'web = browser only / desktop = desktop only / both = both / none = neither',
   'display.web': 'Browser only',
@@ -1372,6 +1378,7 @@ export function makePetConfigSection(rt: {
           whisperEnabled: tpl.whisperEnabled,
           workStatusEnabled: tpl.workStatusEnabled,
           fixedEnabled: tpl.fixedEnabled,
+          dragPhysicsEnabled: tpl.dragPhysicsEnabled !== false,
           display: tpl.display,
           position: { ...tpl.position },
         },
@@ -1656,6 +1663,9 @@ export function makePetConfigSection(rt: {
                       updateSel({ workStatusEnabled: v }),
                     ),
                     toggleCell('fixedEnabled', !!cur.fixedEnabled, busy, (v) => updateSel({ fixedEnabled: v }), true),
+                    toggleCell('dragPhysicsEnabled', cur.dragPhysicsEnabled !== false, busy, (v) =>
+                      updateSel({ dragPhysicsEnabled: v }),
+                    ),
                   ],
                 }),
 

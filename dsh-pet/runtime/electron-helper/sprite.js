@@ -893,6 +893,14 @@ class PetSprite {
 
   /** rAF 弹簧跟随：窗口朝拖拽目标过阻尼追赶（不再硬贴指针），抹平高频抖动 */
   startDragFollow() {
+    if (this.pet.dragPhysicsEnabled === false) {
+      const target = this.dragTarget;
+      this.stopDragFollow();
+      if (!target) return;
+      this.dragVel = { vx: 0, vy: 0 };
+      this.sendBounds(target.x, target.y);
+      return;
+    }
     if (this.dragFollow !== null) return;
     const token = ++this.dragFollowToken;
     let last = performance.now();
@@ -1234,7 +1242,7 @@ class PetSprite {
     // 因此这次拖了多久、什么时候松手都不影响判定（拖十分钟也早已超出窗口）。
     // 没有「待拉」状态、没有超时清理（见 shared-core 的弹弓换算）。
     const pressNow = performance.now();
-    const sling = pressNow - this.lastPressAt < S.SLINGSHOT_DOUBLE_MS;
+    const sling = this.pet.dragPhysicsEnabled !== false && pressNow - this.lastPressAt < S.SLINGSHOT_DOUBLE_MS;
     this.lastPressAt = sling ? 0 : pressNow; // 命中就清掉，免得连点三下弹两次
     this.hit.classList.add('dragging');
     // 收起悬浮提示：拖拽期间窗口逐帧跟随光标，指针始终在身体内、onMouseMove 的 inBody 恒为真，
@@ -1346,7 +1354,12 @@ class PetSprite {
       // 跟手滞后时落点跟随宠物实际位置，与浏览器 boxPx 同语义）
       const px = this.pos.x;
       const py = this.pos.y;
-      if (d.sling) {
+      if (this.pet.dragPhysicsEnabled === false) {
+        this.dragTrail = [];
+        this.customPos = { rx: (px + this.halfW) / VIEW.w, ry: (py + this.halfH) / VIEW.h };
+        this.position();
+        window.__dshPetDebug.lastDragRelease = { x: this.pos.x, y: this.pos.y };
+      } else if (d.sling) {
         // 弹弓：力度 = **拉距**（与手速无关），方向 = 拉的**反方向**。
         // 拉向量用宠物实际中心算（弹簧跟随有滞后，用户看到的是宠物被拉出去多远）。
         // 之后与甩抛走同一条 startThrow：重力/反弹/摩擦/落地 Q 弹/跨窗互撞/多屏完全复用。

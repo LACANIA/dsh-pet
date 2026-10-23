@@ -108,6 +108,8 @@ export interface Pet {
    *  （余额/碎碎念/工作状态）、点击回应与拖拽一律照常——用户主动触发的不受此限制。
    *  缺失默认 false（保持原行为：会自己走、会自己翻） */
   fixedEnabled: boolean;
+  /** Spring dragging, release inertia and drag slingshots. Missing means true. */
+  dragPhysicsEnabled?: boolean;
   /** 显示位置（web/desktop/both/none，必填）：缺失即配置错误，代码不做兜底 */
   display: PetDisplay;
   position: { corner: Corner; marginX: number; marginY: number };

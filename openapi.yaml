@@ -3177,6 +3177,10 @@ components:
             宠物固定：`true` = 随机动画链不再抽「转向 / 移动」两档（宠物不自己翻朝向、不自己走开，
             只播原地待机与随机小动作）。**只影响随机链**——右键菜单点播、`POST /anim`、
             事件动画（余额/碎碎念/工作状态）、点击回应与拖拽均不受影响。缺失默认 `false`。
+        dragPhysicsEnabled:
+          type: boolean
+          default: true
+          description: 拖拽惯性抛射。false 时直接拖动，松手原地停下，不触发甩抛、反弹或鼠标弹弓；点击回应、接口抛掷和随机动画照常。
         display:
           type: string
           enum: [web, desktop, both, none]
@@ -3241,6 +3245,10 @@ components:
         fixedEnabled:
           type: boolean
           description: 宠物固定（随机链不再抽「转向 / 移动」两档；主动触发不受影响）
+        dragPhysicsEnabled:
+          type: boolean
+          default: true
+          description: 是否启用拖拽弹簧跟随、松手惯性和鼠标弹弓；缺失时默认开启。
         display:
           type: string
           enum: [web, desktop, both, none]

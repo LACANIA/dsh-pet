@@ -589,6 +589,13 @@ function mergePet(
     whisperEnabled: petBool(p.whisperEnabled, base.whisperEnabled, label, 'whisperEnabled', id),
     workStatusEnabled: petBool(p.workStatusEnabled, base.workStatusEnabled, label, 'workStatusEnabled', id),
     fixedEnabled: petBool(p.fixedEnabled, base.fixedEnabled, label, 'fixedEnabled', id),
+    dragPhysicsEnabled: petBool(
+      p.dragPhysicsEnabled,
+      base.dragPhysicsEnabled !== false,
+      label,
+      'dragPhysicsEnabled',
+      id,
+    ),
     display: petEnum(p.display, PET_DISPLAY_SET, base.display, label, 'display', id),
     position: {
       corner: petEnum(ownPos.corner, CORNER_SET, basePos.corner, label, 'position.corner', id),
@@ -722,6 +729,18 @@ export function saveUserConfig(
     // 传了必须是布尔，没传则走下面的读取侧默认值（内置默认 false = 保持原行为）。
     const fixedEnabled = pp.fixedEnabled;
     if (fixedEnabled !== undefined && typeof fixedEnabled !== 'boolean') return null;
+    const oldPet = Array.isArray(existing?.pets)
+      ? (existing.pets.find((p) => p && typeof p === 'object' && (p as Record<string, unknown>).id === id) as
+          Record<string, unknown> | undefined)
+      : undefined;
+    const dragPhysicsEnabled =
+      pp.dragPhysicsEnabled === undefined
+        ? typeof oldPet?.dragPhysicsEnabled === 'boolean'
+          ? oldPet.dragPhysicsEnabled
+          : undefined
+        : pp.dragPhysicsEnabled;
+    if (pp.dragPhysicsEnabled !== undefined && typeof pp.dragPhysicsEnabled !== 'boolean') return null;
+    if (dragPhysicsEnabled !== undefined && typeof dragPhysicsEnabled !== 'boolean') return null;
     const display = String(pp.display ?? '');
     if (!PET_DISPLAY_SET.has(display)) return null;
     const pos = pp.position && typeof pp.position === 'object' ? (pp.position as Record<string, unknown>) : {};
@@ -745,6 +764,7 @@ export function saveUserConfig(
       whisperEnabled,
       workStatusEnabled,
       fixedEnabled,
+      dragPhysicsEnabled,
       display,
       position: { corner, marginX, marginY },
     };

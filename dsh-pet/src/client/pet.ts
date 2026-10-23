@@ -1293,6 +1293,18 @@ export function makePetUI(rt: {
     };
     /** rAF 弹簧跟随：包围盒朝拖拽目标（指针-抓取偏移）过阻尼追赶，抹平高频抖动 */
     const startDragFollow = (rootEl: HTMLDivElement) => {
+      if (cfg.dragPhysicsEnabled === false) {
+        const target = dragTargetRef.current;
+        stopDragFollow();
+        if (!target) return;
+        dragVelRef.current = { vx: 0, vy: 0 };
+        boxPxRef.current = { x: target.x, y: target.y };
+        rootEl.style.left = target.x + 'px';
+        rootEl.style.top = target.y + 'px';
+        rootEl.style.right = 'auto';
+        rootEl.style.bottom = 'auto';
+        return;
+      }
       if (dragFollowRef.current !== null) return;
       const token = ++dragFollowTokenRef.current;
       let last = performance.now();
@@ -1767,7 +1779,7 @@ export function makePetUI(rt: {
       // 因此这次拖了多久、什么时候松手都不影响判定（拖十分钟也早已超出窗口）。
       // 没有模式、没有待拉状态，判定就落在这一句上（见 shared/physics.ts 的弹弓换算）。
       const pressNow = performance.now();
-      const sling = pressNow - lastPressAtRef.current < SLINGSHOT_DOUBLE_MS;
+      const sling = cfg.dragPhysicsEnabled !== false && pressNow - lastPressAtRef.current < SLINGSHOT_DOUBLE_MS;
       lastPressAtRef.current = sling ? 0 : pressNow; // 命中就清掉，免得连点三下弹两次
       const anchor = boxPxRef.current;
       dragRef.current = {
@@ -1875,7 +1887,10 @@ export function makePetUI(rt: {
         const bx = boxPxRef.current;
         const px = bx ? bx.x : e.clientX - d.offX - halfW;
         const py = bx ? bx.y : e.clientY - d.offY - halfH;
-        if (d.sling) {
+        if (cfg.dragPhysicsEnabled === false) {
+          dragTrailRef.current = [];
+          setCustomPos({ rx: (px + halfW) / window.innerWidth, ry: (py + halfH) / window.innerHeight });
+        } else if (d.sling) {
           // 弹弓：力度 = **拉距**（与手速无关），方向 = 拉的**反方向**。
           // 拉向量用宠物实际中心算（不是指针）——弹簧跟手有滞后，用户看到的是宠物拉出去多远。
           // 之后与甩抛走同一条 startThrow：重力/反弹/摩擦/落地 Q 弹/宠物互撞/多屏完全复用。

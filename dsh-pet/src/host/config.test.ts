@@ -36,6 +36,7 @@ const BASE = {
       whisperEnabled: false,
       workStatusEnabled: false,
       fixedEnabled: false,
+      dragPhysicsEnabled: true,
       display: 'web',
       position: { corner: 'bottom-right', marginX: 40, marginY: 40 },
     },
@@ -523,6 +524,74 @@ describe('saveUserConfig —— 宠物固定 fixedEnabled（per-pet 白名单）
     const pets = out?.pets as Record<string, unknown>[];
     assert.equal(pets.find((p) => p.id === 'a')?.fixedEnabled, true);
     assert.equal(pets.find((p) => p.id === 'b')?.fixedEnabled, false);
+  });
+});
+
+describe('dragPhysicsEnabled configuration', () => {
+  test('old configurations default to enabled and explicit false is merged', () => {
+    for (const flag of [undefined, true, false, 'invalid']) {
+      const paths = withBase({}, { pets: [{ ...BASE.pets[0], dragPhysicsEnabled: flag }] });
+      try {
+        const pets = readAllConfig(paths).main.pets as Record<string, unknown>[];
+        assert.equal(pets[0].dragPhysicsEnabled, flag !== false);
+        assert.equal(pets[0].fixedEnabled, false);
+      } finally {
+        rmSync(dirname(paths.defaultFile), { recursive: true, force: true });
+      }
+    }
+  });
+
+  test('saving preserves each pet and does not alter pin in place', () => {
+    const out = saveOnce({
+      pets: [
+        { ...PETS[0], id: 'a', fixedEnabled: true, dragPhysicsEnabled: false },
+        { ...PETS[0], id: 'b', fixedEnabled: false, dragPhysicsEnabled: true },
+      ],
+    });
+    const pets = out?.pets as Record<string, unknown>[];
+    assert.deepEqual(
+      pets.map((p) => [p.id, p.fixedEnabled, p.dragPhysicsEnabled]),
+      [
+        ['a', true, false],
+        ['b', false, true],
+      ],
+    );
+  });
+
+  test('old clients retain a disabled preference by ID rather than array position', () => {
+    const bare: Record<string, unknown> = { ...PETS[0] };
+    delete bare.dragPhysicsEnabled;
+    const existing = {
+      pets: [
+        { ...PETS[0], id: 'b', dragPhysicsEnabled: true },
+        { ...PETS[0], id: 'a', dragPhysicsEnabled: false },
+      ],
+    };
+    const out = saveOnce(
+      {
+        pets: [
+          { ...bare, id: 'a' },
+          { ...bare, id: 'b' },
+        ],
+      },
+      existing,
+    );
+    const pets = out?.pets as Record<string, unknown>[];
+    assert.deepEqual(
+      pets.map((p) => p.dragPhysicsEnabled),
+      [false, true],
+    );
+    const changed = saveOnce({ pets: [{ ...PETS[0], id: 'a', dragPhysicsEnabled: true }] }, existing);
+    assert.equal((changed?.pets as Record<string, unknown>[])[0].dragPhysicsEnabled, true);
+  });
+
+  test('invalid values are rejected and first-time omitted values remain omitted', () => {
+    for (const value of ['false', 0, null, {}])
+      assert.equal(saveOnce({ pets: [{ ...PETS[0], dragPhysicsEnabled: value }] }), null);
+    const bare: Record<string, unknown> = { ...PETS[0] };
+    delete bare.dragPhysicsEnabled;
+    const out = saveOnce({ pets: [bare] });
+    assert.equal((out?.pets as Record<string, unknown>[])[0].dragPhysicsEnabled, undefined);
   });
 });
 

@@ -80,7 +80,10 @@ after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
 });
 
-async function open(t, { get = customized, viewport = { width: 900, height: 900 }, lang = 'en' } = {}) {
+async function open(
+  t,
+  { get = customized, viewport = { width: 900, height: 900 }, lang = 'en', view = 'settings' } = {},
+) {
   const context = await browser.newContext({ viewport });
   t.after(() => context.close());
   const page = await context.newPage();
@@ -113,17 +116,130 @@ async function open(t, { get = customized, viewport = { width: 900, height: 900 
       json: { providers: [{ id: 'test', name: 'Test', models: [{ id: 'model', name: 'Model' }] }] },
     });
   });
-  await page.goto(`${url}/?lang=${lang}`);
-  await page.locator('.dsh-pet-cfg').waitFor();
+  await page.goto(`${url}/?lang=${lang}&view=${view}`);
+  await page.locator(view === 'pet' ? '.dsh-pet-hit' : '.dsh-pet-cfg').waitFor();
   return { page, writes };
 }
 
 async function save(page) {
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'PUT'),
-    page.getByRole('button', { name: 'Save', exact: true }).click(),
+    page.getByRole('button', { name: 'Save', exact: true }).first().click(),
   ]);
 }
+
+test('drag inertia defaults on and can be disabled without changing pin in place', async (t) => {
+  const { page, writes } = await open(t, { get: defaults });
+  const inertia = page.getByRole('checkbox', { name: 'Drag inertia', exact: true });
+  const fixed = page.getByRole('checkbox', { name: 'Pin in place', exact: true });
+  await page.getByRole('button', { name: 'Save', exact: true }).first().waitFor({ state: 'visible' });
+  await inertia.waitFor();
+  assert.equal(await inertia.isChecked(), true);
+  assert.equal(await fixed.isChecked(), false);
+  assert.equal(await page.getByRole('checkbox', { name: 'Autonomous movement', exact: true }).count(), 0);
+  await inertia.uncheck();
+  await save(page);
+  assert.equal(writes[0].pets[0].dragPhysicsEnabled, false);
+  assert.notEqual(writes[0].pets[0].fixedEnabled, true);
+});
+
+test('drag inertia preserves each pet and its original pin setting', async (t) => {
+  const { page, writes } = await open(t, {
+    get: {
+      main: {
+        ...customized.main,
+        pets: [
+          { ...pet, fixedEnabled: true, dragPhysicsEnabled: false },
+          { ...pet, id: 'pet-2', name: 'Pink', fixedEnabled: false, dragPhysicsEnabled: true },
+        ],
+      },
+    },
+  });
+  const inertia = page.getByRole('checkbox', { name: 'Drag inertia', exact: true });
+  await page.getByRole('button', { name: 'Pink (240px)', exact: true }).waitFor();
+  assert.equal(await inertia.isChecked(), false);
+  assert.equal(await page.getByRole('checkbox', { name: 'Pin in place', exact: true }).isChecked(), true);
+  await page.getByRole('button', { name: 'Pink (240px)', exact: true }).click();
+  assert.equal(await inertia.isChecked(), true);
+  await inertia.uncheck();
+  await save(page);
+  assert.equal(writes[0].pets.find((p) => p.id === 'pet-1').fixedEnabled, true);
+  assert.equal(writes[0].pets.find((p) => p.id === 'pet-2').fixedEnabled, false);
+  assert.equal(writes[0].pets.find((p) => p.id === 'pet-1').dragPhysicsEnabled, false);
+  assert.equal(writes[0].pets.find((p) => p.id === 'pet-2').dragPhysicsEnabled, false);
+});
+
+function dragConfig(enabled) {
+  return {
+    main: {
+      ...defaults.main,
+      pets: [
+        {
+          ...pet,
+          fixedEnabled: true,
+          dragPhysicsEnabled: enabled,
+          balanceEnabled: false,
+          whisperEnabled: false,
+          workStatusEnabled: false,
+        },
+      ],
+      animations: {
+        idle: ['idle'],
+        turn: [],
+        drag: ['drag'],
+        clicks: ['click'],
+        moves: { default: {}, actions: [] },
+        categories: [],
+        events: {},
+      },
+      animationWeights: { idle: 100, turn: 0, move: 0 },
+      eventsRefreshSec: {},
+    },
+  };
+}
+
+async function samplePosition(page) {
+  return page.evaluate(async () => {
+    const points = [];
+    for (let i = 0; i < 16; i++) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const r = document.querySelector('.dsh-pet-root').getBoundingClientRect();
+      points.push({ x: r.x, y: r.y });
+    }
+    return points;
+  });
+}
+
+test('drag inertia off keeps browser fast and double drags at their released position', async (t) => {
+  const { page } = await open(t, { get: dragConfig(false), view: 'pet' });
+  for (let i = 0; i < 2; i++) {
+    const hit = await page.locator('.dsh-pet-hit').boundingBox();
+    await page.mouse.move(hit.x + hit.width / 2, hit.y + hit.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(hit.x + hit.width / 2 - 160, hit.y + hit.height / 2 + 70, { steps: 5 });
+    await page.mouse.up();
+  }
+  const points = await samplePosition(page);
+  assert.ok(
+    points.every((p) => Math.abs(p.x - points[0].x) < 0.5 && Math.abs(p.y - points[0].y) < 0.5),
+    JSON.stringify(points),
+  );
+  assert.ok(points[0].x < 500, 'the pet must still have been dragged');
+});
+
+test('drag inertia defaults preserve browser release motion', async (t) => {
+  const { page } = await open(t, { get: dragConfig(undefined), view: 'pet' });
+  const hit = await page.locator('.dsh-pet-hit').boundingBox();
+  await page.mouse.move(hit.x + hit.width / 2, hit.y + hit.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hit.x + hit.width / 2 - 180, hit.y + hit.height / 2 + 80, { steps: 5 });
+  await page.mouse.up();
+  const points = await samplePosition(page);
+  assert.ok(
+    points.some((p) => Math.hypot(p.x - points[0].x, p.y - points[0].y) > 5),
+    JSON.stringify(points),
+  );
+});
 
 test('pending config prevents editing and saving placeholder defaults', async (t) => {
   let release;
