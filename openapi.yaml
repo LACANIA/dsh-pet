@@ -1634,7 +1634,7 @@ paths:
         "400":
           description: |
             请求体非法。可能是 JSON 解析失败（`invalid JSON body`），
-            或字段校验不通过（`invalid pet config`：`id` 为空/超 64 字/含文件名非法字符、
+            或字段校验不通过（`invalid pet config`：`id` 非字符串/为空/去除首尾空白后重复/超 64 字/含文件名非法字符、
             `size` 非正数、`balanceEnabled` 非布尔、`display` 不在枚举内、
             `position.corner` 不在枚举内、`marginX`/`marginY` 非数字等）。
           content:

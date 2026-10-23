@@ -419,6 +419,83 @@ describe('JSONC 配置读取：字符串中的注释标记与转义', () => {
 
 const PETS = BASE.pets;
 
+describe('saveUserConfig pet IDs', () => {
+  test('rejects repeated IDs before writing a configuration that would lose a pet', () => {
+    assert.equal(
+      saveOnce({
+        pets: [
+          { ...PETS[0], name: 'first' },
+          { ...PETS[0], name: 'second' },
+        ],
+      }),
+      null,
+    );
+  });
+
+  test('rejects IDs that collide after the same trimming used during reads', () => {
+    assert.equal(
+      saveOnce({
+        pets: [
+          { ...PETS[0], id: ' main ' },
+          { ...PETS[0], id: 'main' },
+        ],
+      }),
+      null,
+    );
+  });
+
+  test('rejects blank and non-string IDs instead of writing unreadable entries', () => {
+    for (const id of ['', '   ', '\t\n', 42, true, null, {}, ['main']]) {
+      assert.equal(saveOnce({ pets: [{ ...PETS[0], id }] }), null, JSON.stringify(id));
+    }
+  });
+
+  test('canonical IDs survive a save/read round trip, including Chinese IDs', () => {
+    const clean = saveOnce({
+      pets: [
+        { ...PETS[0], id: ' main ' },
+        { ...PETS[0], id: ' 副宠 ' },
+      ],
+    });
+    assert.ok(clean);
+    const pets = clean.pets as Record<string, unknown>[];
+    assert.deepEqual(
+      pets.map((p) => p.id),
+      ['main', '副宠'],
+    );
+    const paths = withBase({}, clean);
+    try {
+      assert.deepEqual(
+        (readAllConfig(paths).main.pets as Record<string, unknown>[]).map((p) => p.id),
+        ['main', '副宠'],
+      );
+    } finally {
+      rmSync(dirname(paths.defaultFile), { recursive: true, force: true });
+    }
+  });
+
+  test('keeps distinct case-sensitive IDs and allows matching display names', () => {
+    const clean = saveOnce({
+      pets: [
+        { ...PETS[0], id: 'Blue' },
+        { ...PETS[0], id: 'blue' },
+      ],
+    });
+    assert.ok(clean);
+    assert.deepEqual(
+      (clean.pets as Record<string, unknown>[]).map((p) => p.id),
+      ['Blue', 'blue'],
+    );
+  });
+
+  test('retains the ID length limit and path character restrictions', () => {
+    assert.ok(saveOnce({ pets: [{ ...PETS[0], id: 'a'.repeat(64) }] }));
+    for (const id of ['a'.repeat(65), 'pet/name', 'pet\\name', 'pet:name', 'pet\0name']) {
+      assert.equal(saveOnce({ pets: [{ ...PETS[0], id }] }), null);
+    }
+  });
+});
+
 describe('saveUserConfig —— 表情包配图开关（白名单 + 透传保留）', () => {
   test('两个配图开关随请求体写入', () => {
     const out = saveOnce({ pets: PETS, whisperImageEnabled: true, chatImageEnabled: true });

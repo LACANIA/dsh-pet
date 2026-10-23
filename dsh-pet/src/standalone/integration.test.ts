@@ -15,7 +15,7 @@
  */
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -102,6 +102,31 @@ test('real plugin chat routes cannot bypass the standalone capability using enco
     assert.equal(((await response.json()) as { reason: string }).reason, 'pet-required');
   } finally {
     await protectedServer.close();
+  }
+});
+
+test('config pet IDs: duplicate IDs return 400 without creating a user file', async (t) => {
+  const file = configPathsFor(packageRoot, home).userFile;
+  assert.equal(existsSync(file), false);
+  t.after(() => rmSync(file, { force: true }));
+  const pet = {
+    id: 'main',
+    name: 'Blue',
+    size: 240,
+    balanceEnabled: false,
+    display: 'web',
+    position: { corner: 'top-right', marginX: 20, marginY: 20 },
+  };
+  for (const id of ['main', ' main ']) {
+    const response = await fetch(`${base}/dsh-pet-7340/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pets: [pet, { ...pet, id, name: 'second' }] }),
+    });
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: string };
+    assert.match(body.error, /^invalid pet config:/);
+    assert.equal(existsSync(file), false);
   }
 });
 

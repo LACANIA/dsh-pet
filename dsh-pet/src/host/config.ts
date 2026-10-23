@@ -698,12 +698,15 @@ export function saveUserConfig(
   const arr = Array.isArray(o.pets) ? o.pets : null;
   if (!arr || !arr.length) return null;
   const out: unknown[] = [];
+  const seenIds = new Set<string>();
   for (const p of arr) {
     if (!p || typeof p !== 'object') return null;
     const pp = p as Record<string, unknown>;
-    const id = String(pp.id ?? '');
+    // Match mergePet's canonical identity before checking uniqueness or writing to disk.
+    const id = typeof pp.id === 'string' ? pp.id.trim() : '';
     // 有意过滤文件名非法字符（Windows 保留符 + 控制字符），防止配置值逃逸 main-config.jsonc 路径
-    if (!id || id.length > 64 || ID_FORBIDDEN.test(id)) return null;
+    if (!id || id.length > 64 || ID_FORBIDDEN.test(id) || seenIds.has(id)) return null;
+    seenIds.add(id);
     const size = Number(pp.size);
     if (!Number.isFinite(size) || size <= 0) return null;
     // 显示名：可重复不校验唯一；缺失/留空/非字符串 → 按该宠物 id 处理（兼容旧配置）并告警
