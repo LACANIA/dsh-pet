@@ -1299,8 +1299,13 @@ export function apply(ctx: any): void {
         }
       }
       if (method === 'PUT') {
+        let parsed: unknown;
         try {
-          const parsed = JSON.parse(body ?? '');
+          parsed = JSON.parse(body ?? '');
+        } catch {
+          return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
+        }
+        try {
           // 透传保留：读当前磁盘上的用户文件原对象，把非白名单顶层字段（physics/whisperPrompt/
           // chatMemoryRounds/...）带回给 saveUserConfig——设置页保存不再抹掉用户手改的精调配置。
           // **必须走 JSONC 容忍解析器**（readUserConfig）：用户层可能是「同步」写入的带 // 注释
@@ -1335,8 +1340,9 @@ export function apply(ctx: any): void {
           // 设置页把它直接交给容器的 flattenConfigPets 拍平渲染——客户端的条目级字段
           // （动画池/权重/物理参数/工作状态文案）只有这一处填充，不再有第二份补吹实现。
           return { kind: 'json', status: 200, obj: readAllConfig(configPaths) };
-        } catch {
-          return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
+        } catch (e) {
+          ctx.logger?.warn?.(`[dsh-pet] config save failed: ${e instanceof Error ? e.message : String(e)}`);
+          return { kind: 'json', status: 500, obj: { error: 'failed to save config' } };
         }
       }
       if (method === 'POST') {

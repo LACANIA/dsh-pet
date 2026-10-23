@@ -269,6 +269,9 @@ export const zh = {
   memesDir: '表情包目录（可自定义/扩充配图）',
   saved: '已保存，桌宠即时生效。',
   loadError: '加载配置失败',
+  saveError: '保存配置失败，请检查服务连接、配置目录的写入权限或服务日志。',
+  saveInvalid: '保存配置失败：配置内容无效，请检查后重试。',
+  syncError: '同步配置失败，请检查服务连接和配置目录的写入权限。',
   loading: '正在加载配置…',
   retry: '重试',
   invalid: '请检查输入：大小需为正数，边距可为任意数字。',
@@ -451,6 +454,10 @@ export const en = {
   memesDir: 'Meme images dir (add/customize images here)',
   saved: 'Saved — the pets updated instantly.',
   loadError: 'Failed to load config',
+  saveError:
+    'Failed to save config. Check the server connection, configuration directory write permissions and server log.',
+  saveInvalid: 'Failed to save config: invalid configuration. Check the values and try again.',
+  syncError: 'Failed to sync config. Check the server connection and configuration directory write permissions.',
   loading: 'Loading config…',
   retry: 'Retry',
   invalid: 'Check your input: size must be positive; margins can be any number.',
@@ -1298,13 +1305,16 @@ export function makePetConfigSection(rt: {
           });
           return;
         }
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        if (!res.ok) {
+          setMsg({ kind: 'err', text: t(res.status === 400 ? 'saveInvalid' : 'saveError') });
+          return;
+        }
         // 同上：PUT 响应即成品聚合，容器据此重新拍平（新增/删除宠物、改大小位置都走这条路）
         petBridge.reload((await res.json()) as Record<string, Record<string, unknown>>);
         void reloadNotifications(); // 通知引擎重读开关：保存后即时生效，无需刷新页面
         setMsg({ kind: 'ok', text: t('saved') });
       } catch {
-        setMsg({ kind: 'err', text: t('loadError') });
+        setMsg({ kind: 'err', text: t('saveError') });
       } finally {
         setBusy(false);
       }
@@ -1351,7 +1361,7 @@ export function makePetConfigSection(rt: {
         void reloadNotifications();
         setMsg({ kind: 'ok', text: t('saved') });
       } catch {
-        setMsg({ kind: 'err', text: t('loadError') });
+        setMsg({ kind: 'err', text: t('syncError') });
       } finally {
         setBusy(false);
       }

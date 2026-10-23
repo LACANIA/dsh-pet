@@ -1662,6 +1662,14 @@ paths:
                   userFile:
                     type: string
                     description: 损坏的用户配置文件绝对路径
+        "500":
+          description: 配置保存或重新读取失败，具体原因记录在服务端日志中。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: failed to save config
     post:
       tags: [Config]
       operationId: syncConfigFromDefault
