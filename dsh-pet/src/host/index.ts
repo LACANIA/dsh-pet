@@ -94,7 +94,7 @@
  *             依赖可解析后替换为 DSH 官方类型。
  */
 import { createReadStream, existsSync, fstatSync, readFileSync } from 'node:fs';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { join, normalize, resolve, sep } from 'node:path';
@@ -104,7 +104,8 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials';
 import { listBalanceProviders, queryBalance, registerBalanceProvider } from './balance/index';
 import { generateWhisper } from './whisper';
 import { automaticWhisperSchedule } from './whisper-policy';
-import { generateChat, type ChatMemoryMessage } from './chat';
+import { generateChat } from './chat';
+import { readChatMemory, type ChatMemory } from './chat-memory';
 import { configuredModel } from './model-selection';
 import { limitPool, pickMeme, readMemePool } from './memes';
 import {
@@ -722,33 +723,9 @@ export function apply(ctx: any): void {
   // 对话写操作串行队列：read-modify-write 排队执行，防两端同时对话时交错写盘
   let chatQueue: Promise<void> = Promise.resolve();
 
-  /** 读记忆文件：不存在 → 空；损坏 → 显式报错 + 备份原始文件（绝不静默丢数据）+ 重建空记忆 */
-  const readMemory = async (): Promise<Record<string, Record<string, { messages: ChatMemoryMessage[] }>>> => {
-    let raw: string;
-    try {
-      raw = await readFile(memoryPath, 'utf8');
-    } catch {
-      return {}; // 文件不存在 = 尚无记忆
-    }
-    try {
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      if (!parsed || typeof parsed !== 'object') throw new Error('not an object');
-      return parsed as Record<string, Record<string, { messages: ChatMemoryMessage[] }>>;
-    } catch (e) {
-      console.error(
-        `dsh-pet: 记忆文件损坏已备份（对话将从头开始）：${memoryPath}（${e instanceof Error ? e.message : String(e)}）`,
-      );
-      try {
-        await mkdir(userRoot, { recursive: true });
-        await writeFile(`${memoryPath}.bak-${Date.now()}`, raw, 'utf8');
-      } catch {
-        /* 备份失败仅告警，不阻断 */
-      }
-      return {};
-    }
-  };
+  const readMemory = (): Promise<ChatMemory> => readChatMemory(memoryPath);
 
-  const writeMemory = async (mem: Record<string, Record<string, { messages: ChatMemoryMessage[] }>>): Promise<void> => {
+  const writeMemory = async (mem: ChatMemory): Promise<void> => {
     await mkdir(userRoot, { recursive: true });
     await writeFile(memoryPath, JSON.stringify(mem, null, 2), 'utf8');
   };
