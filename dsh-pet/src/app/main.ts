@@ -31,9 +31,10 @@ import { fileURLToPath } from 'node:url';
 import { flattenPetList, readAllConfig } from '../host/config';
 import { dshHomeDir } from '../host/helper-process';
 import { apply } from '../host/index';
+import { createFileLogger, setDefaultLogger } from '../host/log-file';
 import { createStandaloneAi } from '../standalone/ai-provider';
 import { packageVersion } from '../standalone/check';
-import { createStandaloneContext, createStandaloneLogger, type RegisteredRoute } from '../standalone/context';
+import { createStandaloneContext, type RegisteredRoute } from '../standalone/context';
 import { configPathsFor } from '../standalone/options';
 import { createRequestSecurity } from '../standalone/request-security';
 
@@ -84,7 +85,36 @@ if (!locked) {
  * 之前被 require（内部有 `app.commandLine.appendSwitch`，ready 后再加不生效）。
  */
 async function boot(): Promise<void> {
-  const logger = createStandaloneLogger();
+  // 独立应用没有控制台：插件日志、standalone 日志、以及同进程 helper/渲染端的 console 全部落盘。
+  // 原始 console 方法要**先快照**：包装后的 console 会转给文件 logger，而 logger 的 base 必须指向
+  // 原始方法，否则 logger → console → logger 无限递归。
+  const logFile = join(dshHomeDir(), 'dsh-pet', 'logs.txt');
+  const rawConsole = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+    debug: console.debug.bind(console),
+  };
+  const logger = createFileLogger({
+    file: logFile,
+    base: rawConsole,
+    debugEnabled: process.env.DSH_PET_LOG_DEBUG === '1',
+  });
+  const toLine = (args: unknown[]): string => args.map((a) => (typeof a === 'string' ? a : String(a))).join(' ');
+  for (const level of ['info', 'warn', 'error', 'debug'] as const) {
+    console[level] = (...args: unknown[]): void => {
+      rawConsole[level](...args);
+      logger[level](toLine(args));
+    };
+  }
+  console.log = (...args: unknown[]): void => {
+    rawConsole.log(...args);
+    logger.info(toLine(args));
+  };
+  // 纯模块（config/chat/whisper）没有 ctx.logger，靠默认出口落盘
+  setDefaultLogger(logger);
+
   const routes: RegisteredRoute[] = [];
   let port = 0;
 
@@ -146,6 +176,9 @@ async function boot(): Promise<void> {
 
   app.on('second-instance', () => log('已有一个实例在运行，忽略本次启动'));
   app.on('will-quit', () => {
+    // 退出前把最后一批日志刷出去（定时器最多 1s，这里显式补一次）
+    void logger.flush();
+    logger.dispose();
     void ai.dispose();
     void context.dispose().catch(() => undefined);
     void server.close().catch(() => undefined);

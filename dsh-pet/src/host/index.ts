@@ -103,7 +103,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths';
 import { credentialRef } from '@deepseek-ai/dsh-credentials';
 import { listBalanceProviders, queryBalance, registerBalanceProvider } from './balance/index';
 import { generateWhisper } from './whisper';
-import { automaticWhisperSchedule } from './whisper-policy';
+import { automaticWhisperSchedule, type StandaloneWhisperPolicy } from './whisper-policy';
 import { generateChat, type ChatMemoryMessage } from './chat';
 import { configuredModel } from './model-selection';
 import { limitPool, pickMeme, readMemePool } from './memes';
@@ -116,6 +116,7 @@ import {
 } from './broadcast';
 import { decideAnim } from './anim';
 import { LockStore } from './lock';
+import { createFileLogger, isFileLogger, setDefaultLogger } from './log-file';
 import { MENU_WAIT_MAX_MS, MenuRegistry } from './menu';
 import { decidePosition, decideThrow, positionLeafData } from './motion-cue';
 import { parsePlaybackPath, parseWaitQuery, PlaybackStore } from './playback';
@@ -314,6 +315,54 @@ export function apply(ctx: any): void {
   // 用户数据根：配置与用户素材统一收敛于此（扩展包按 <插件id> 各自建目录）
   const dshHome = resolveDshHome();
   const userRoot = join(dshHome, 'dsh-pet');
+  // 统一日志出口（单文件、按大小截断，见 ./log-file）：桌面版 DSH 没有控制台，
+  // `ctx.logger` 只写宿主 stdout 等于把排障信息丢掉。放在最前面——下面的配置迁移、
+  // 桌面判定、Helper 崩溃/重启都走它；`base` 保留终端输出，node 版行为不变。
+  //
+  // standalone / 独立应用已经把**自己的**文件 logger 挂在 ctx.logger 上（见 standalone/context.ts）：
+  // 那时必须复用它，否则两个 logger 各自的缓冲与截断会写同一个文件、互相踩。
+  const reusedLog = isFileLogger(ctx.logger) ? ctx.logger : undefined;
+  const log =
+    reusedLog ??
+    createFileLogger({
+      file: join(userRoot, 'logs.txt'),
+      base: ctx.logger,
+      debugEnabled: process.env.DSH_PET_LOG_DEBUG === '1',
+    });
+  // 纯模块（./config、./chat、./whisper）拿不到 ctx.logger，用这个默认出口落盘
+  setDefaultLogger(log);
+  // 只在自己创建时负责收尾：复用的 logger 归 standalone/app 生命周期管，插件卸载不该把它关掉。
+  if (!reusedLog) {
+    ctx.effect(
+      () => () => {
+        void log.flush();
+        log.dispose();
+      },
+      'dsh-pet: log file',
+    );
+  }
+  /**
+   * 软取宿主提供的**可选服务**（DSH 的 `ctx.get(name, required)` 语义：缺失返回 undefined，不抛）。
+   *
+   * 为什么不直接读 `ctx.standaloneAi`：DSH 的 ctx 是**严格 getter**，读一个没写进 `inject`
+   * 的服务会**抛异常**（`cannot get property "standaloneAi" without inject`），而不是返回 undefined。
+   * 独立模式独有的两个能力都没进 inject，裸读在 DSH 里必然炸：
+   *   - 碎碎念周期 tick 每拍都抛 → catch 后不再排下一拍 → 自动碎碎念永久停摆（7440b96 起）；
+   *   - /quit 的 `typeof ctx.shutdownApp` 每个请求都抛 → GET /quit 回 500，而不是 {canQuit:false}。
+   * 与下面余额里取 `deepseekAccount` 的写法同源：可选服务一律软取，不进 inject。
+   *
+   * 最小 fake ctx（测试里的普通对象）没有 get：回落成属性读取，语义一致（缺字段即 undefined）。
+   */
+  const optionalService = (name: string): unknown => {
+    const get = (ctx as { get?: (n: string, required?: boolean) => unknown }).get;
+    if (typeof get === 'function') return get.call(ctx, name, false);
+    return (ctx as unknown as Record<string, unknown>)[name];
+  };
+
+  /** 独立模式的碎碎念授权策略（可选能力）：DSH 宿主里是 undefined → 回落到只看 pet.whisperEnabled。 */
+  const standaloneAiPolicy = (): StandaloneWhisperPolicy | undefined =>
+    optionalService('standaloneAi') as StandaloneWhisperPolicy | undefined;
+
   // 用户主配置（可编辑层）与文件宠物目录；配置读取/合并统一走 readAllConfig（./config）。
   // 主配置是 **JSONC**（main-config.jsonc）——与包内默认 config.jsonc 同名同格式：
   // 「同步」写进去的就是带注释的原文，扩展名如实反映内容（旧版 main-config.json 只读回落 + 启动迁移）
@@ -329,7 +378,7 @@ export function apply(ctx: any): void {
   };
   // 老用户一次性迁移：main-config.json → main-config.jsonc（重命名，内容一字不动；
   // 新文件已存在则不动旧文件）。失败不影响运行——读取侧对旧路径有回落。
-  migrateUserConfig(configPaths, (msg) => console.log('[dsh-pet] ' + msg));
+  migrateUserConfig(configPaths, (msg) => log.info('[dsh-pet] ' + msg));
   // 用户动画目录（thumb 播放时优先于包内素材；webm 放 main-animation/webm/，mov（macOS 定制）放 main-animation/mov/）
   const thumbUserRoot = join(userRoot, 'main-animation');
   // 用户表情包目录（碎碎念/对话配图的图片：优先于包内 assets/memes，加图不必改包）
@@ -735,7 +784,7 @@ export function apply(ctx: any): void {
       if (!parsed || typeof parsed !== 'object') throw new Error('not an object');
       return parsed as Record<string, Record<string, { messages: ChatMemoryMessage[] }>>;
     } catch (e) {
-      console.error(
+      log.error(
         `dsh-pet: 记忆文件损坏已备份（对话将从头开始）：${memoryPath}（${e instanceof Error ? e.message : String(e)}）`,
       );
       try {
@@ -819,7 +868,7 @@ export function apply(ctx: any): void {
     const result = await generateWhisper(ctx, system, meme, configuredModel(found.conf, 'whisperModel'));
     if (!result.ok) {
       // 失败**不写 S**（与改造前一致：静默跳过 + console.warn，不伪造文案、不弹错误气泡）
-      console.warn(
+      log.warn(
         '[dsh-pet] 碎碎念生成失败 pet=' +
           petId +
           ' reason=' +
@@ -832,6 +881,12 @@ export function apply(ctx: any): void {
       return result;
     }
     state.writePet(petId, 'say', result.image ? { text: result.text, image: result.image } : { text: result.text });
+    // 成功也留一行（此前只有失败有日志）：调度拍了、生成也回来了，但「成功」在文件里毫无痕迹，
+    // 于是「没触发」与「触发了并且成功」无法区分。
+    log.info(
+      `[dsh-pet] 碎碎念生成成功 pet=${petId}，${result.text.length} 字` +
+        (result.image ? `，配图=${result.image}` : ''),
+    );
     // 文本随返回值带出，且与刚写进叶子的**是同一个变量**：两条出口给同一份文本，不是一个真相两个版本
     return { ok: true, text: result.text, ...(result.image ? { image: result.image } : {}) };
   };
@@ -943,6 +998,9 @@ export function apply(ctx: any): void {
   };
 
   const refreshBalance = async (manual = false): Promise<void> => {
+    // 开始 + 结果各一行：此前成功路径**完全静默**，logs.txt 里既看不出「有没有查」，
+    // 也看不出「查了但余额没变」，排错只能靠人肉盯 /state。
+    log.info(`[dsh-pet] 余额刷新开始（${manual ? '手动' : '周期'}）`);
     const mark = <T>(v: T): T | (T & { manual: true }) => (manual ? { ...v, manual: true } : v);
     try {
       const sel = ctx.agentDefaultModel.currentSelection();
@@ -962,16 +1020,28 @@ export function apply(ctx: any): void {
         },
       );
       state.writeSection('balance', mark(result));
+      // 失败也写 S（前端弹文字说明），日志同样留一条：否则「查了、失败了」与「根本没查」
+      // 在文件里长得一模一样。成功用 info，失败用 warn（亮度不同，扫一眼就能分辨）。
+      if (result.ok) {
+        log.info(`[dsh-pet] 余额刷新成功 provider=${result.provider}（${result.shape}）`);
+      } else {
+        log.warn(
+          `[dsh-pet] 余额刷新失败 provider=${result.provider} reason=${result.reason}` +
+            (result.message ? ' ' + result.message : ''),
+        );
+      }
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
       state.writeSection(
         'balance',
         mark({
           ok: false,
           provider: 'unknown',
           reason: 'fetch-error',
-          message: e instanceof Error ? e.message : String(e),
+          message,
         }),
       );
+      log.warn('[dsh-pet] 余额刷新异常：' + message);
     }
   };
 
@@ -1020,12 +1090,12 @@ export function apply(ctx: any): void {
       // 诊断日志（issue #168）：设置页显示「仅桌面」却始终没有 helper 进程时，这一行能立刻
       // 分辨「宿主读到的 display 就是 web」还是「读到了 desktop」——此前这个判定完全不可见。
       // 托盘开关同样只在这一行里可见：加了它之后「为什么没有托盘/为什么留着空进程」都靠这里看。
-      ctx.logger?.info?.(
+      log.info(
         `[dsh-pet] 桌面判定：pets=${pets.length}，桌面可见=${desktopPets.length}` +
           `（${desktopPets.map((p) => String(p.id)).join(',') || '无'}）→ hasDesktopPet=${hasDesktopPet} tray=${trayOn}`,
       );
     } catch (e) {
-      ctx.logger?.warn?.(`[dsh-pet] 宠物配置非法，桌面模式已跳过：${e instanceof Error ? e.message : String(e)}`);
+      log.warn(`[dsh-pet] 宠物配置非法，桌面模式已跳过：${e instanceof Error ? e.message : String(e)}`);
     }
   };
   refreshDesktop();
@@ -1076,9 +1146,9 @@ export function apply(ctx: any): void {
       // 「连尝试都没有」且没有任何线索。这里只加可见性，重试节奏与次数保持原样。
       portWaitAttempts += 1;
       if (portWaitAttempts === 1) {
-        ctx.logger?.info?.(`[dsh-pet] webServer 端口尚未就绪（port=${String(port)}），每 500ms 重试拉起桌面 Helper`);
+        log.info(`[dsh-pet] webServer 端口尚未就绪（port=${String(port)}），每 500ms 重试拉起桌面 Helper`);
       } else if (portWaitAttempts % 20 === 0) {
-        ctx.logger?.warn?.(
+        log.warn(
           `[dsh-pet] 已等待 webServer 端口 ${(portWaitAttempts * 500) / 1000}s 仍未就绪` +
             `（port=${String(port)}），桌面 Helper 尚未拉起`,
         );
@@ -1142,14 +1212,14 @@ export function apply(ctx: any): void {
           };
         },
       },
-      ctx.logger ?? console,
+      log,
     );
     try {
       helper.start();
       desktopModeEverActive = true; // 此后即使桌面宠物清零也保留 Helper：托盘常驻，可随时切回来
-      ctx.logger?.info?.(`dsh-pet desktop helper started (config: ${configUrl})`);
+      log.info(`dsh-pet desktop helper started (config: ${configUrl})`);
     } catch (e) {
-      ctx.logger?.warn?.(`dsh-pet desktop helper start failed: ${e instanceof Error ? e.message : String(e)}`);
+      log.warn(`dsh-pet desktop helper start failed: ${e instanceof Error ? e.message : String(e)}`);
       helper = undefined;
     }
   };
@@ -1165,7 +1235,7 @@ export function apply(ctx: any): void {
       // 托盘关掉后这里也会命中：没人需要那个图标，空常驻没有意义（见 desktopModeEverActive 注释）。
       if (!noDesktopSkipped) {
         noDesktopSkipped = true;
-        ctx.logger?.info?.(
+        log.info(
           `[dsh-pet] 无桌面宠物（display 均为 web/none）且无需保留托盘（tray=${trayOn}），已跳过桌面 Helper 启动`,
         );
       }
@@ -1176,7 +1246,7 @@ export function apply(ctx: any): void {
     if (!hasGraphicalDisplay()) {
       if (!displayWarned) {
         displayWarned = true;
-        ctx.logger?.warn?.(
+        log.warn(
           '[dsh-pet] 未检测到图形显示环境（DISPLAY/WAYLAND_DISPLAY 均为空），已跳过桌面宠物。' +
             '浏览器内宠物不受影响；如需在服务器上启用桌面模式，请配置 Xvfb 后设置 DSH_PET_DESKTOP_FORCE=1。',
         );
@@ -1190,21 +1260,23 @@ export function apply(ctx: any): void {
     }
     // 诊断日志（issue #168）：只报「没找到」不够用——最常见的情形是「文件明明存在」，
     // 但不在实际查询的路径上（DSH_HOME 不一致）。把真正查的路径一起打出来。
-    ctx.logger?.warn?.(
+    log.warn(
       `[dsh-pet] 未找到 Electron 可执行文件：DSH_HOME=${dshHomeDir()}，查找路径=${defaultElectronExe()}` +
         `，DSH_PET_ELECTRON_PATH=${process.env.DSH_PET_ELECTRON_PATH ?? '(未设置)'}`,
     );
-    ctx.logger?.warn?.(`[dsh-pet] 开始下载 Electron 到 ${defaultElectronExe()} ...`);
+    log.warn(`[dsh-pet] 开始下载 Electron 到 ${defaultElectronExe()} ...`);
     electronEnsure = ensureElectronDownload({
       // 下载全过程写进工作状态气泡（用户没有控制台，只能靠它看进度与失败原因）
       onLog: ({ text, level, done }) =>
         reportDownload(text, level === 'warn' ? 'error' : done ? 'success' : 'working', done),
+      // 同一份进度也落盘：气泡只在有宠物显示时可见，桌面版 Helper 起不来时它就没有载体
+      logger: log,
     })
       .then((path) => {
         if (path) {
           launchHelper(path);
         } else {
-          ctx.logger?.warn?.(
+          log.warn(
             '[dsh-pet] Electron download failed; desktop pet unavailable. Set DSH_PET_ELECTRON_PATH and restart, or retry later.',
           );
         }
@@ -1252,7 +1324,7 @@ export function apply(ctx: any): void {
         startHelper();
       })
       .catch((e: unknown) => {
-        ctx.logger?.warn?.(`[dsh-pet] 重启桌面 Helper 失败：${e instanceof Error ? e.message : String(e)}`);
+        log.warn(`[dsh-pet] 重启桌面 Helper 失败：${e instanceof Error ? e.message : String(e)}`);
       });
     return desktopSyncQueue;
   };
@@ -1299,8 +1371,13 @@ export function apply(ctx: any): void {
         }
       }
       if (method === 'PUT') {
+        let parsed: unknown;
         try {
-          const parsed = JSON.parse(body ?? '');
+          parsed = JSON.parse(body ?? '');
+        } catch {
+          return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
+        }
+        try {
           // 透传保留：读当前磁盘上的用户文件原对象，把非白名单顶层字段（physics/whisperPrompt/
           // chatMemoryRounds/...）带回给 saveUserConfig——设置页保存不再抹掉用户手改的精调配置。
           // **必须走 JSONC 容忍解析器**（readUserConfig）：用户层可能是「同步」写入的带 // 注释
@@ -1314,7 +1391,7 @@ export function apply(ctx: any): void {
               status: 400,
               obj: {
                 error:
-                  'invalid pet config: expected { pets:[{name?,id,size,balanceEnabled,display,position:{corner,marginX,marginY}}] }（display 为 web/desktop/both/none 之一；可选顶层 notificationsEnabled / whisperImageEnabled / chatImageEnabled / trayEnabled 布尔；可选宠物布尔 whisperEnabled / workStatusEnabled / fixedEnabled / dragPhysicsEnabled）',
+                  'invalid pet config: expected { pets:[{name?,id,size,balanceEnabled,display,position:{corner,marginX,marginY}}] }（id 为非空字符串且去除首尾空白后唯一；display 为 web/desktop/both/none 之一；可选顶层 notificationsEnabled / whisperImageEnabled / chatImageEnabled / trayEnabled 布尔；可选宠物布尔 whisperEnabled / workStatusEnabled / fixedEnabled / dragPhysicsEnabled）',
               },
             };
           }
@@ -1335,8 +1412,9 @@ export function apply(ctx: any): void {
           // 设置页把它直接交给容器的 flattenConfigPets 拍平渲染——客户端的条目级字段
           // （动画池/权重/物理参数/工作状态文案）只有这一处填充，不再有第二份补吹实现。
           return { kind: 'json', status: 200, obj: readAllConfig(configPaths) };
-        } catch {
-          return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
+        } catch (e) {
+          ctx.logger?.warn?.(`[dsh-pet] config save failed: ${e instanceof Error ? e.message : String(e)}`);
+          return { kind: 'json', status: 500, obj: { error: 'failed to save config' } };
         }
       }
       if (method === 'POST') {
@@ -1454,6 +1532,39 @@ export function apply(ctx: any): void {
       if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
       void syncDesktop();
       return { kind: 'json', status: 200, obj: { reloading: true } };
+    }
+
+    // 托盘「退出」（桌面 Helper 的托盘菜单 → GET 探能力 / POST 执行，issue #178）。
+    // 为什么不是 helper 自己 app.quit()：BRIDGE 模式下 helper 由宿主拉起，它退出会被**当成崩溃**按
+    // 指数退避重启（helper-process.ts），点了只是闪一下、进程还在；必须由宿主执行「停 Helper + 关服务 +
+    // 退出」。这个能力只有独立模式提供（standalone 伪 ctx 上的 shutdownApp，见 src/standalone/context.ts）：
+    // DSH 内的桌面模式没有它 —— 关掉整个 DSH 不该由一只宠物的托盘决定，故 canQuit:false、菜单项不出现。
+    // 不调 syncDesktop：退出不是重启，reload 那条守卫仍要求它恰好出现 4 次。
+    if (rest === 'quit') {
+      // 能力按**请求时**软取：DSH 宿主没有这个服务（裸读属性会抛，见 optionalService 的说明），
+      // 于是拿到 undefined → canQuit:false，退出菜单项不出现；独立模式取得到 → 菜单可用。
+      const quit = optionalService('shutdownApp');
+      const canQuit = typeof quit === 'function';
+      if (method === 'GET') return { kind: 'json', status: 200, obj: { canQuit } };
+      if (method !== 'POST') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      // 失败按动作端点口径回 200 + 结构化结果（与 /pet-display 一致）：不支持退出不是协议层错误。
+      if (!canQuit) {
+        return {
+          kind: 'json',
+          status: 200,
+          obj: { ok: false, reason: 'unsupported', message: '宿主未提供退出能力（DSH 内请关闭桌面模式）' },
+        };
+      }
+      // 不 await：收尾会先停掉发起请求的这个 Helper，响应不保证送达（与 /reload 同一处境）。
+      // 推到下一拍再执行，让本次 200 先写出去。
+      setImmediate(() => {
+        try {
+          (quit as (reason: string) => void)('托盘退出');
+        } catch (e: unknown) {
+          log.warn(`[dsh-pet] 托盘退出失败：${e instanceof Error ? e.message : String(e)}`);
+        }
+      });
+      return { kind: 'json', status: 200, obj: { ok: true } };
     }
 
     // 配置文件路径 + 存储位置清单（设置页「高级配置」与「卸载与存储」展示用）
@@ -2595,9 +2706,15 @@ export function apply(ctx: any): void {
         sec = balancePeriodSec(cfg);
         // 没有任何启用余额的宠物 → 不查（省外部调用）；配置改了下一拍自然跟上
         if (flattenPetList(cfg).some((p) => p.balanceEnabled === true)) await refreshBalance();
-      } catch {
+        else log.info('[dsh-pet] 余额周期跳过：没有启用余额的宠物');
+      } catch (e) {
         // 读配置抛错 = 安装损坏（readAllConfig 只在**内置默认**缺失/损坏时抛，用户层写坏只会告警回退）：
         // 不再重排——每 30 分钟重试一次没有意义，而且会白占一个常驻定时器。修好安装后重启 DSH 即可。
+        // 留一行 warn：这条路径会让余额周期**永久停摆**，此前全静默，与「查了但没变化」无法区分。
+        log.warn(
+          '[dsh-pet] 余额周期读配置失败，周期刷新已停止（重启 DSH 后恢复）：' +
+            (e instanceof Error ? e.message : String(e)),
+        );
         return;
       }
       arm(sec);
@@ -2626,6 +2743,11 @@ export function apply(ctx: any): void {
         const cfg = readAllConfig(configPaths);
         const now = Date.now();
         let min = Infinity;
+        // 每一拍的账：检查几只、到点几只、没到点几只、跳过几只（带原因）。只用于日志，调度行为不变。
+        let checked = 0;
+        let due = 0;
+        let notDue = 0;
+        const skipped: string[] = [];
         for (const pet of flattenPetList(cfg)) {
           const petId = String(pet.id ?? '');
           if (!petId) continue;
@@ -2633,28 +2755,54 @@ export function apply(ctx: any): void {
           // 搜索同一集合）；查不到只可能是两者口径漂移——跳过这一拍，**不猜也不兜底 main**。
           const found = findPetInstance(cfg, petId);
           if (!found) continue;
+          checked += 1;
           const schedule = automaticWhisperSchedule(
-            ctx.standaloneAi,
+            standaloneAiPolicy(),
             pet.whisperEnabled === true,
             whisperPeriodSec(found.conf),
           );
-          if (!schedule.enabled) continue;
+          if (!schedule.enabled) {
+            // 两种「没启用」分开记：宠物自己关掉，与独立模式没授权，处理方式完全不同
+            skipped.push(
+              petId + ': ' + (pet.whisperEnabled === true ? '独立模式未授权自动碎碎念' : 'whisperEnabled=false'),
+            );
+            continue;
+          }
           const sec = schedule.periodSec;
           min = Math.min(min, sec);
-          if (now - (lastWhisperAt.get(petId) ?? 0) < sec * 1000) continue;
+          if (now - (lastWhisperAt.get(petId) ?? 0) < sec * 1000) {
+            notDue += 1;
+            continue;
+          }
           // 占用锁：这只宠物被占用时**跳过这一拍**——不生成也不补（碎碎念是瞬时事件，过期即弃）。
           // 而且**不推进 lastWhisperAt**：锁一放开，下一拍就该照常说。
           // 宿主侧只挡这一处 **per-pet** 来源；两个**全局段**（balance / workStatus）不在这里挡——
           // 它们所有宠物共用一份，宿主"跳过写入"会连带静音别的宠物；那两处由渲染端按宠物忽略
           // （见 src/client/pet.ts 的冻结判定），代价是叶子照常推进、渲染端自己不看。
-          if (lock.locked(petId)) continue;
+          if (lock.locked(petId)) {
+            skipped.push(petId + ': 占用锁跳过');
+            continue;
+          }
+          due += 1;
+          log.info(`[dsh-pet] 碎碎念到点 pet=${petId}（周期 ${sec}s），开始生成`);
           lastWhisperAt.set(petId, now);
           // 不 await：生成要几秒，别把调度拍拖住（每只宠物独立生成，互不阻塞）
           void publishWhisper(petId).catch(() => {});
         }
         if (Number.isFinite(min)) next = min;
-      } catch {
-        // 读配置抛错 = 安装损坏（同余额定时器）：不再重排，别白占常驻句柄
+        // 每拍一行汇总：调度是否还在跑、下一拍多久、为什么跳过，全在这一行里（300s 一条，量可忽略）
+        log.info(
+          `[dsh-pet] 碎碎念调度：检查 ${checked} 只 → 到点 ${due}、未到点 ${notDue}、跳过 ${skipped.length}` +
+            (skipped.length > 0 ? `（${skipped.join('；')}）` : '') +
+            `；下一拍 ${next}s`,
+        );
+      } catch (e) {
+        // 读配置抛错 = 安装损坏（同余额定时器）：不再重排，别白占常驻句柄。
+        // 但必须留一行 warn：这条路径会让自动碎碎念**永久停摆**，此前它是全静默的。
+        log.warn(
+          '[dsh-pet] 碎碎念调度读配置失败，自动碎碎念已停止（重启 DSH 后恢复）：' +
+            (e instanceof Error ? e.message : String(e)),
+        );
         return;
       }
       arm(next);
@@ -2736,14 +2884,14 @@ export function apply(ctx: any): void {
           const text = rawInput.trim();
           if (!text) {
             void publishWhisper(petId).catch((e: unknown) =>
-              console.warn('[dsh-pet] 碎碎念异常：' + (e instanceof Error ? e.message : String(e))),
+              log.warn('[dsh-pet] 碎碎念异常：' + (e instanceof Error ? e.message : String(e))),
             );
             return { kind: 'success', text: '已让桌宠碎碎念一句' };
           }
           if (text.length > 2000) return { kind: 'error', text: '消息过长（限 2000 字）' };
           void chatWithPet(petId, text).then((r) => {
             if (!r.ok) {
-              console.warn('[dsh-pet] 对话失败 reason=' + r.reason + (r.message ? ' ' + r.message : ''));
+              log.warn('[dsh-pet] 对话失败 reason=' + r.reason + (r.message ? ' ' + r.message : ''));
             }
           });
           return { kind: 'success', text: '已发送，桌宠马上回应' };

@@ -89,6 +89,12 @@ jobs:
       - name: 构建 lib（四个入口）
         run: pnpm run bundle
 
+      # shared-core.js（window.PetShared）是 src/shared 的 iife 产物，被 .gitignore 排除、不入库。
+      # 少了它，桌面 helper 的 constants.js 顶层拿不到 window.PetShared，渲染端直接崩、桌宠不显示。
+      # 发布链的 prepare.js 会构建它，但本流水线只跑 bundle，所以必须显式补这一步。
+      - name: 构建桌面共享核心（shared-core）
+        run: pnpm run build:desktop-core
+
       - name: 类型检查
         run: pnpm run typecheck
 
