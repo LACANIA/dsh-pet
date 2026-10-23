@@ -101,12 +101,32 @@ describe('defaultElectronExe —— 落地可执行文件路径', () => {
 });
 
 describe('resolveElectronPath —— 候选优先级', () => {
+  test('Electron cache validation: skips empty files and directories before a usable candidate', () => {
+    withIsolatedHome((dir) => {
+      const empty = join(dir, 'empty');
+      const directory = join(dir, 'folder');
+      const usable = join(dir, 'usable');
+      writeFileSync(empty, '');
+      mkdirSync(directory);
+      writeFileSync(usable, 'executable fixture');
+      assert.equal(resolveElectronPath([empty, directory, usable]), usable);
+    });
+  });
+
+  test('Electron cache validation: does not resolve an empty managed cache', () => {
+    withIsolatedHome(() => {
+      const path = defaultElectronExe();
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, '');
+      assert.equal(resolveElectronPath(), undefined);
+    });
+  });
   test('显式候选命中时直接返回（不读环境变量）', () => {
     withIsolatedHome((dir) => {
       const fake = join(dir, 'fake-electron.exe');
-      writeFileSync(fake, '');
+      writeFileSync(fake, 'executable fixture');
       const other = join(dir, 'other-electron.exe');
-      writeFileSync(other, '');
+      writeFileSync(other, 'executable fixture');
       assert.equal(resolveElectronPath([fake, other]), fake);
     });
   });
@@ -114,7 +134,7 @@ describe('resolveElectronPath —— 候选优先级', () => {
   test('候选顺序：第一个存在的胜出', () => {
     withIsolatedHome((dir) => {
       const fake = join(dir, 'fake-electron.exe');
-      writeFileSync(fake, '');
+      writeFileSync(fake, 'executable fixture');
       assert.equal(resolveElectronPath([join(dir, 'missing.exe'), fake]), fake);
     });
   });
@@ -122,7 +142,7 @@ describe('resolveElectronPath —— 候选优先级', () => {
   test('DSH_PET_ELECTRON_PATH 环境变量参与候选（在显式候选之后）', () => {
     withIsolatedHome((dir) => {
       const viaEnv = join(dir, 'env-electron.exe');
-      writeFileSync(viaEnv, '');
+      writeFileSync(viaEnv, 'executable fixture');
       process.env.DSH_PET_ELECTRON_PATH = viaEnv;
       assert.equal(resolveElectronPath([]), viaEnv);
     });
@@ -137,7 +157,7 @@ describe('resolveElectronPath —— 候选优先级', () => {
   test('候选去重：重复路径只保留一次（结果仍能命中）', () => {
     withIsolatedHome((dir) => {
       const fake = join(dir, 'fake-electron.exe');
-      writeFileSync(fake, '');
+      writeFileSync(fake, 'executable fixture');
       assert.equal(resolveElectronPath([fake, fake, join(dir, 'missing.exe')]), fake);
     });
   });
@@ -145,7 +165,7 @@ describe('resolveElectronPath —— 候选优先级', () => {
   test('空字符串 / null 候选被跳过', () => {
     withIsolatedHome((dir) => {
       const fake = join(dir, 'fake-electron.exe');
-      writeFileSync(fake, '');
+      writeFileSync(fake, 'executable fixture');
       assert.equal(resolveElectronPath(['', undefined, fake] as Array<string | undefined>), fake);
     });
   });
@@ -161,10 +181,61 @@ describe('resolveElectronPath —— 候选优先级', () => {
             : 'electron';
       const landed = join(dir, 'dshhome', 'electron', rel);
       mkdirSync(dirname(landed), { recursive: true });
-      writeFileSync(landed, '');
+      writeFileSync(landed, 'executable fixture');
       assert.equal(resolveElectronPath([]), landed);
     });
   });
+});
+
+test('Electron cache validation: an existing non-empty file avoids a download', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-pet-cache-'));
+  const previous = process.env.DSH_HOME;
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  });
+  process.env.DSH_HOME = home;
+  const path = defaultElectronExe();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, 'executable fixture');
+  let logs = 0;
+  assert.equal(
+    await ensureElectronDownload({
+      onLog: () => {
+        logs++;
+      },
+    }),
+    path,
+  );
+  assert.equal(logs, 0);
+});
+
+test('Electron cache validation: an empty file enters the download path and reports failure', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-pet-cache-'));
+  const previous = process.env.DSH_HOME;
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  });
+  process.env.DSH_HOME = home;
+  const path = defaultElectronExe();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, '');
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'warn', () => {});
+  const logs: string[] = [];
+  // Invalid version plus a loopback-only mirror: this test must never download a real runtime.
+  const result = await ensureElectronDownload({
+    version: 'invalid-version',
+    mirror: 'http://127.0.0.1:1/',
+    timeoutMs: 200,
+    onLog: (e) => logs.push(e.text),
+  });
+  assert.equal(result, undefined);
+  assert.ok(logs.some((m) => m.includes('缓存无效')));
+  assert.ok(logs.some((m) => m.includes('下载失败')));
 });
 
 describe('hasGraphicalDisplay —— 无图形环境时不拉起 Electron', () => {
