@@ -19,6 +19,8 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
+import { createFileLogger } from '../host/log-file';
+
 /** 独立模式下余额路由报出的服务商 id（未登记 → `unsupported`，气泡里能看到它） */
 export const STANDALONE_PROVIDER = 'standalone';
 
@@ -60,6 +62,15 @@ export interface StandaloneContextOptions {
   routes?: RegisteredRoute[];
   ai?: StandaloneModelService;
   authenticatedUrl?: (baseUrl: string) => string;
+  /**
+   * 「关掉整个独立模式进程」的能力（桌面 Helper 托盘的「退出」，issue #178）。
+   *
+   * 只有独立模式有这个东西：helper 自己 `app.quit()` 会被宿主的崩溃重启逻辑当成异常退出、
+   * 750ms 后原地复活，真正的退出必须让本进程走 `/shutdown` 那条收尾路径
+   * （`context.dispose()` → 停 Helper → 关服务 → `exit 0`）。DSH 内的桌面模式**不挂**这个字段：
+   * 关掉整个 DSH 不该由一只宠物的托盘决定，宿主路由据此回 `canQuit:false`（见 src/host/index.ts 的 /quit）。
+   */
+  shutdown?: (reason: string) => void;
 }
 
 export interface StandaloneContext {
@@ -73,8 +84,26 @@ export interface StandaloneContext {
   dispose(): Promise<void>;
 }
 
-/** 默认日志器：直接写控制台，格式与插件自身的 `[dsh-pet]` 前缀区分开 */
-export function createStandaloneLogger(): StandaloneLogger {
+/** `createStandaloneLogger` 的选项 */
+export interface StandaloneLoggerOptions {
+  /**
+   * 落盘文件（单文件、按大小截断，见 ../host/log-file）。
+   * 不给则只写控制台——`--check` 这类短命令不需要留文件。
+   */
+  file?: string;
+}
+
+/** 默认日志器：给了 file 就写成文件日志器，否则直接写控制台，格式与插件自身的 `[dsh-pet]` 前缀区分开 */
+export function createStandaloneLogger(options: StandaloneLoggerOptions = {}): StandaloneLogger {
+  if (options.file) {
+    // 这个 logger 会挂到伪 ctx.logger 上：插件（host/index.ts）据此复用同一个文件出口，
+    // 不再自建第二个写同一文件的 logger（两份缓冲/截断会互相踩）。
+    return createFileLogger({
+      file: options.file,
+      base: console,
+      debugEnabled: process.env.DSH_PET_LOG_DEBUG === '1',
+    });
+  }
   const stamp = (): string => new Date().toISOString().replace('T', ' ').slice(0, 19);
   const write = (level: string, message: string): void => {
     console.log(`[dsh-pet-standalone ${stamp()}] ${level} ${message}`);
@@ -145,9 +174,17 @@ export function createStandaloneContext(options: StandaloneContextOptions): Stan
         if (services.get(name) === value) services.delete(name);
       };
     },
-    /** 服务查找（Cordis 的 ctx.get 语义）：独立模式没有别的插件，通常拿不到 */
+    /**
+     * 服务查找（Cordis 的 ctx.get 语义）。先查注册表，再回落到 ctx 自身的属性——
+     * 独立模式把可选能力（standaloneAi / shutdownApp）直接挂在伪 ctx 上，而不是走 provide 注册；
+     * 而 host 侧统一用 `ctx.get(name, false)` 软取（DSH 的严格 getter 不允许裸读未 inject 的服务）。
+     * 不回落的话，独立模式会把**本来就有的能力**判成没有：自动碎碎念被当成「未授权」、
+     * 托盘退出的菜单项直接消失。
+     */
     get(name: string): unknown {
-      return services.get(name);
+      const registered = services.get(name);
+      if (registered !== undefined) return registered;
+      return (this as unknown as Record<string, unknown>)[name];
     },
     /** 独立模式没有 DSH 会话事件：不订阅，工作状态保持空闲 */
     on(): () => void {
@@ -165,6 +202,9 @@ export function createStandaloneContext(options: StandaloneContextOptions): Stan
           },
         }
       : {}),
+    // 托盘「退出」的能力开关：宿主路由（src/host/index.ts 的 /quit）只看这个字段在不在，
+    // 不关心它内部怎么停机——独立模式复用 cli.ts 已有的 /shutdown 收尾，不写第二套停机逻辑。
+    ...(options.shutdown ? { shutdownApp: options.shutdown } : {}),
     commands: { register: (): (() => void) => () => {} },
     agentDefaultModel: {
       currentSelection: (): { provider: string; model: string } =>

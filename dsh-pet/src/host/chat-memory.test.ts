@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { normalizeChatMemory, readChatMemory } from './chat-memory.ts';
+import { setDefaultLogger } from './log-file.ts';
 
 const user = { role: 'user', content: 'hello', ts: 1 };
 const assistant = { role: 'assistant', content: 'hi', ts: 2 };
@@ -89,13 +90,19 @@ test('chat memory valid files remain unchanged and do not create backups', async
 });
 
 test('chat memory structurally damaged files are backed up byte-for-byte and valid histories survive', async (t) => {
-  t.mock.method(console, 'error', () => {});
+  const errors: string[] = [];
+  setDefaultLogger({ error: (message) => errors.push(message) });
+  t.after(() => setDefaultLogger(null));
   const dir = mkdtempSync(join(tmpdir(), 'dsh-pet-memory-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'memory.json');
   const raw = JSON.stringify({ main: { first: { messages: {} }, second: { messages: [user, null, assistant] } } });
   writeFileSync(path, raw);
   assert.deepEqual(await readChatMemory(path), { main: { second: { messages: [user, assistant] } } });
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].includes(path));
+  assert.ok(errors[0].includes('invalid chat memory structure'));
+  assert.ok(!errors[0].includes(user.content));
   const backups = readdirSync(dir).filter((p) => p.startsWith('memory.json.bak-'));
   assert.equal(backups.length, 1);
   assert.equal(readFileSync(join(dir, backups[0]), 'utf8'), raw);

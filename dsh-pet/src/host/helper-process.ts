@@ -16,6 +16,8 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+
+import type { LoggerLike } from './log-file';
 // `@electron/get` 只在**真的要下载** Electron 时才用到，因此按需动态加载（见 ensureElectronDownload）：
 // 静态 import 会把它连同 got/fs-extra 一串依赖钉进每个产物的启动路径，而独立应用模式下这条路径永远不执行。
 
@@ -172,6 +174,11 @@ export interface EnsureElectronOptions {
    * DSH 桌面版用户」看的一句短话。宿主负责截断与投递，本函数只产出文本——它不认识 state。
    */
   onLog?: (event: ElectronDownloadLog) => void;
+  /**
+   * 落盘日志出口（宿主注入的统一日志器，见 ./log-file）。
+   * 不传则退回 console：CLI / 单测里仍能直接在终端看到。
+   */
+  logger?: LoggerLike;
 }
 
 /** 一条下载日志：`text` 给用户看；`level='warn'` = 失败路径；`done` = 本次下载已收尾（成功或失败） */
@@ -195,9 +202,11 @@ export async function ensureElectronDownload(options: EnsureElectronOptions = {}
   const exe = defaultElectronExe();
   if (existsSync(exe)) return exe;
 
-  // 下载日志用 console 直出（ctx.logger 在部分宿主不映射到终端，排障时看不到）。
-  const log = (message: string): void => console.log(`[dsh-pet] ${message}`);
-  const warn = (message: string): void => console.warn(`[dsh-pet] ${message}`);
+  // 下载日志默认走 console；宿主会把它自己的统一日志器传进来——桌面版没有控制台，
+  // console 直出等于丢失（ctx.logger 在部分宿主也不映射到终端，见 issue #168 的教训）。
+  const sink = options.logger ?? console;
+  const log = (message: string): void => sink.info?.(`[dsh-pet] ${message}`);
+  const warn = (message: string): void => sink.warn?.(`[dsh-pet] ${message}`);
   // 同一件事两个出口（见 EnsureElectronOptions.onLog）：console 原文 + 给用户看的一句。
   // 文案刻意分成两套——版本号 / 路径 / 耗时对开发者有用，对用户是噪音，不合并成同一句。
   const info = (consoleText: string, text: string, done = false): void => {

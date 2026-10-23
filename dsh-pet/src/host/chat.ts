@@ -29,6 +29,7 @@
 import { BlockAssembler, createAssistantMessage, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { PET_CALL_IDENTITY, noTextReason } from './llm-call';
 import { supportsReasoningOff } from './llm-reasoning';
+import { defaultLog } from './log-file';
 import { extractChatImage, memeCatalog, type MemeEntry } from './memes';
 import { modelCandidates, modelLabel, type ModelRef } from './model-selection';
 
@@ -93,7 +94,8 @@ export async function generateChat(
     last = result;
     // 回落要留痕：配的模型没生效时能在日志里看到原因（否则"我明明配了 A，怎么还是用 B"没法查）
     if (i + 1 < candidates.length) {
-      console.warn(
+      defaultLog(
+        'warn',
         `dsh-pet: 对话用 ${modelLabel(sel)} 生成失败（${result.message ?? result.reason}），回落到 ${modelLabel(candidates[i + 1])}`,
       );
     }

@@ -75,6 +75,8 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 // 我们的 DPI 缓存与 Chromium profile 都会和别人混在一起。必须赶在任何 getPath('userData') 之前设。
 // 应用模式：本文件被 `src/app/main.ts` 直接 import 进同一进程（独立应用，不 spawn 子进程）。
 // 双击启动的用户没有终端可按 Ctrl+C，托盘上必须有一个「退出」，否则只能去任务管理器杀进程。
+// 退出项不只给独立应用（issue #178）：手动 start-desktop 流同样没有终端；BRIDGE 模式则由宿主
+// 决定能不能退（GET /quit 探 canQuit，DSH 宿主答 false）。见 startTray 里的 quitApp。
 // DSH 内的桌面模式不设这个变量，托盘形态与 userData 目录都保持原样。
 const APP_MODE = process.env.DSH_PET_APP_MODE === '1';
 // Captured only for in-process app requests; never exposed to renderer URLs or logs.
@@ -761,6 +763,31 @@ async function startTray() {
       }))
       .filter((pet) => pet.id);
     if (!pets.length) return; // 配置里没有任何宠物：没有可切换的对象，不建托盘
+    // 托盘「退出」是否可用（issue #178）：三种来源各自成立——
+    //   · 独立应用（APP_MODE）：本进程就是全部，app.quit() 即退出；
+    //   · 手动 start-desktop.mjs（!BRIDGE）：node 父进程只等本进程退出，app.quit() 后进程树干净收场；
+    //   · BRIDGE：宿主拉起的 Helper，**不能自己 app.quit()**——那会被当成崩溃按退避重启（点了只是闪一下），
+    //     必须问宿主愿不愿意退（GET /quit 的 canQuit）。DSH 宿主不提供该能力，菜单项因此不出现。
+    // 探测失败（旧宿主没有 /quit、返回素材兜底等）一律按"不支持"处理，行为与改动前一致。
+    let hostCanQuit = false;
+    if (BRIDGE && !APP_MODE) {
+      try {
+        hostCanQuit = JSON.parse((await hostRequest('GET', PET_ROUTE + '/quit')).body || '{}').canQuit === true;
+      } catch (e) {
+        console.error('[dsh-pet-desktop-helper] quit capability probe failed:', String(e && e.message ? e.message : e));
+      }
+    }
+    const canQuit = APP_MODE || !BRIDGE || hostCanQuit;
+    const quitApp = () => {
+      if (!BRIDGE || APP_MODE) {
+        app.quit();
+        return;
+      }
+      // 交给宿主停机：它会先停本进程再退，所以这条请求不用等结果
+      hostRequest('POST', PET_ROUTE + '/quit').catch((e) => {
+        console.error('[dsh-pet-desktop-helper] tray quit failed:', String(e && e.message ? e.message : e));
+      });
+    };
     tray = new Tray(trayIcon());
     tray.setToolTip('dsh-pet 桌面宠物');
     tray.setContextMenu(
@@ -771,7 +798,7 @@ async function startTray() {
           checked: isDesktopDisplay(pet.display),
           click: () => traySetPetDisplay(pet.id, toggleDisplay(pet.display)),
         })),
-        ...(APP_MODE ? [{ type: 'separator' }, { label: '退出', click: () => app.quit() }] : []),
+        ...(canQuit ? [{ type: 'separator' }, { label: '退出', click: quitApp }] : []),
       ]),
     );
     // Windows 上 setContextMenu 只接管右键，左键默认什么都不做（macOS 相反：左键即弹菜单）

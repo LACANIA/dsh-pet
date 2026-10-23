@@ -80,7 +80,7 @@ after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
 });
 
-async function open(t, { get = customized, viewport = { width: 900, height: 900 }, lang = 'en' } = {}) {
+async function open(t, { get = customized, put, post, viewport = { width: 900, height: 900 }, lang = 'en' } = {}) {
   const context = await browser.newContext({ viewport });
   t.after(() => context.close());
   const page = await context.newPage();
@@ -94,9 +94,10 @@ async function open(t, { get = customized, viewport = { width: 900, height: 900 
     if (new URL(request.url()).pathname === '/dsh-pet-7340/config') {
       if (request.method() === 'PUT') {
         writes.push(request.postDataJSON());
+        if (put) return put(route);
         return route.fulfill({ json: customized });
       }
-      if (request.method() === 'POST') return route.fulfill({ json: defaults });
+      if (request.method() === 'POST') return post ? post(route) : route.fulfill({ json: defaults });
       if (typeof get === 'function') return get(route);
       return route.fulfill({ json: get });
     }
@@ -121,9 +122,71 @@ async function open(t, { get = customized, viewport = { width: 900, height: 900 
 async function save(page) {
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'PUT'),
-    page.getByRole('button', { name: 'Save', exact: true }).click(),
+    page.getByRole('button', { name: 'Save', exact: true }).first().click(),
   ]);
 }
+
+test('config save errors: write failures keep edits visible and allow a retry', async (t) => {
+  let attempts = 0;
+  const { page, writes } = await open(t, {
+    put: (route) =>
+      ++attempts === 1
+        ? route.fulfill({ status: 500, json: { error: 'failed to save config' } })
+        : route.fulfill({ json: customized }),
+  });
+  const size = page.locator('input[type="number"]').first();
+  await page.getByRole('button', { name: 'Save', exact: true }).first().waitFor({ state: 'visible' });
+  await size.fill('320');
+  await save(page);
+  await page
+    .getByText(
+      'Failed to save config. Check the server connection, configuration directory write permissions and server log.',
+      { exact: true },
+    )
+    .first()
+    .waitFor();
+  assert.equal(await page.getByText('Failed to load config', { exact: true }).count(), 0);
+  assert.equal(await size.inputValue(), '320');
+  await save(page);
+  await page.getByText('Saved — the pets updated instantly.', { exact: true }).first().waitFor();
+  assert.equal(writes[1].pets[0].size, 320);
+});
+
+test('config save errors: validation failures explain the rejected configuration', async (t) => {
+  const { page } = await open(t, {
+    put: (route) => route.fulfill({ status: 400, json: { error: 'invalid pet config' } }),
+  });
+  await save(page);
+  await page
+    .getByText('Failed to save config: invalid configuration. Check the values and try again.', { exact: true })
+    .first()
+    .waitFor();
+});
+
+test('config save errors: network failures display a save error and release the button', async (t) => {
+  const { page } = await open(t, { put: (route) => route.abort('failed') });
+  await page.getByRole('button', { name: 'Save', exact: true }).first().click();
+  await page
+    .getByText(
+      'Failed to save config. Check the server connection, configuration directory write permissions and server log.',
+      { exact: true },
+    )
+    .first()
+    .waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Save', exact: true }).first().isEnabled(), true);
+});
+
+test('config save errors: sync failures use the sync message', async (t) => {
+  const { page } = await open(t, { post: (route) => route.fulfill({ status: 500, json: { error: 'write failed' } }) });
+  await page.getByRole('button', { name: 'Sync', exact: true }).click();
+  await page.getByRole('button', { name: 'Sync', exact: true }).last().click();
+  await page
+    .getByText('Failed to sync config. Check the server connection and configuration directory write permissions.', {
+      exact: true,
+    })
+    .first()
+    .waitFor();
+});
 
 test('pending config prevents editing and saving placeholder defaults', async (t) => {
   let release;

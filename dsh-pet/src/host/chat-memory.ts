@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { ChatMemoryMessage } from './chat';
+import { defaultLog } from './log-file';
 
 export type ChatMemory = Record<string, Record<string, { messages: ChatMemoryMessage[] }>>;
 
@@ -58,7 +59,8 @@ export async function readChatMemory(path: string): Promise<ChatMemory> {
     recovered = result.memory;
     throw new Error('invalid chat memory structure');
   } catch (e) {
-    console.error(
+    defaultLog(
+      'error',
       `dsh-pet: 记忆文件异常，备份原文并恢复有效对话：${path}（${e instanceof Error ? e.message : String(e)}）`,
     );
     try {

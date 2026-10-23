@@ -1634,7 +1634,7 @@ paths:
         "400":
           description: |
             请求体非法。可能是 JSON 解析失败（`invalid JSON body`），
-            或字段校验不通过（`invalid pet config`：`id` 为空/超 64 字/含文件名非法字符、
+            或字段校验不通过（`invalid pet config`：`id` 非字符串/为空/去除首尾空白后重复/超 64 字/含文件名非法字符、
             `size` 非正数、`balanceEnabled` 非布尔、`display` 不在枚举内、
             `position.corner` 不在枚举内、`marginX`/`marginY` 非数字等）。
           content:
@@ -1662,6 +1662,14 @@ paths:
                   userFile:
                     type: string
                     description: 损坏的用户配置文件绝对路径
+        "500":
+          description: 配置保存或重新读取失败，具体原因记录在服务端日志中。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: failed to save config
     post:
       tags: [Config]
       operationId: syncConfigFromDefault
@@ -1859,6 +1867,61 @@ paths:
                   reloading:
                     type: boolean
                     const: true
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /dsh-pet-7340/quit:
+    get:
+      tags: [Action]
+      operationId: probeQuit
+      summary: 探测宿主是否允许退出
+      description: |
+        托盘「退出」的能力探测（issue #178）。只有独立模式提供 `shutdownApp` 服务时
+        `canQuit` 为 `true`；DSH 内的桌面模式没有该能力，返回 `false`，托盘菜单不显示退出项。
+        能力按**请求时**判定，不缓存。
+      responses:
+        "200":
+          description: 能力探测结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [canQuit]
+                properties:
+                  canQuit:
+                    type: boolean
+              example:
+                canQuit: false
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+    post:
+      tags: [Action]
+      operationId: quitHost
+      summary: 请求宿主退出（托盘「退出」）
+      description: |
+        立刻回 `200`，再异步调用宿主的 `shutdownApp` 收尾（停 Helper + 关服务 + 退出）。
+        发起者通常就是即将被停掉的 Helper，**响应不保证送达**。
+
+        宿主未提供退出能力时同样回 `200`，但 `ok:false, reason:"unsupported"`
+        （动作端点口径：不支持不是协议层错误，与 `POST /pet-display` 一致）。
+      responses:
+        "200":
+          description: 已接受退出请求，或明确告知不支持
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+                  reason:
+                    type: string
+                    enum: [unsupported]
+                  message:
+                    type: string
+              example:
+                ok: true
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
 

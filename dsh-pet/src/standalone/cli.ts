@@ -20,10 +20,12 @@
  * （结构化失败 + 日志，不假装成功）。详见 README 的「独立运行（不打开 DSH）」一节。
  */
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { flattenPetList, readAllConfig } from '../host/config';
 import { dshHomeDir, packageRoot } from '../host/helper-process';
 import { apply } from '../host/index';
+import { defaultLog, setDefaultLogger } from '../host/log-file';
 import { runCheck, packageVersion } from './check';
 import { createStandaloneAi } from './ai-provider';
 import { createRequestSecurity } from './request-security';
@@ -53,6 +55,10 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
   }
 
   const routes: RegisteredRoute[] = [];
+  // /shutdown 的回调要在服务构造时给出去，而停机函数要在服务之后定义：
+  // 用一个可替换的转发器解耦（服务构造时只拿到"将来会是谁"）。桌面托盘「退出」也走它，
+  // 这样两条退出入口共用同一套收尾（context.dispose → 停 Helper → 关服务 → exit 0）。
+  let forwardShutdown: (reason: string) => void = () => {};
   const portRef = { value: options.port };
   const ai = createStandaloneAi(home, logger);
   const security = createRequestSecurity();
@@ -62,10 +68,10 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
     routes,
     ai,
     authenticatedUrl: security.authenticatedUrl,
+    // 托盘「退出」→ 宿主路由 POST /dsh-pet-7340/quit → 这里 → 与 POST /shutdown 同一条收尾。
+    shutdown: (reason) => forwardShutdown(reason),
   });
-  // /shutdown 的回调要在服务构造时给出去，而停机函数要在服务之后定义：
-  // 用一个可替换的转发器解耦（服务构造时只拿到"将来会是谁"）。
-  let forwardShutdown: () => void = () => {};
+  // 停机函数要在服务之后定义（见上方 forwardShutdown 的说明）。
   const server = await listenStandaloneServer({
     routes,
     logger,
@@ -80,7 +86,7 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
       port: portRef.value,
       uptimeSec: Math.round(process.uptime()),
     }),
-    onShutdown: () => forwardShutdown(),
+    onShutdown: () => forwardShutdown('POST /shutdown'),
   });
   portRef.value = server.port;
   let releaseRuntime: () => void;
@@ -119,7 +125,7 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
         process.exit(1);
       });
   };
-  forwardShutdown = () => requestShutdown('POST /shutdown');
+  forwardShutdown = (reason) => requestShutdown(reason);
   process.on('SIGINT', () => requestShutdown('SIGINT'));
   process.on('SIGTERM', () => requestShutdown('SIGTERM'));
 
@@ -151,7 +157,7 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
       ? '  AI          本机 API 已启用；自动碎碎念遵循设置页开关'
       : '  AI          未配置或未启用，不发送模型请求；右键“打开 AI 设置”后在本机填写',
     '  不可用      余额 / 会话工作状态 / DSH 系统通知',
-    '  退出        Ctrl+C，或 POST /shutdown',
+    '  退出        Ctrl+C、POST /shutdown，或桌面托盘菜单的「退出」',
     '',
   ]) {
     logger.info(line);
@@ -174,7 +180,11 @@ async function main(): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  const logger = createStandaloneLogger();
+  // 日志同时落盘（单文件、按大小截断）：独立模式常常没有终端，只写 stdout 等于丢失。
+  // 插件 apply() 会复用这个 logger（ctx.logger 带 isFileLogger 标记），不会再开第二个写同一文件。
+  const logger = createStandaloneLogger({ file: join(dshHomeDir(), 'dsh-pet', 'logs.txt') });
+  // 纯模块（config/chat/whisper）没有 ctx.logger，靠默认出口落盘
+  setDefaultLogger(logger);
   if (options.check) return runCheck(logger);
   await run(logger, options);
   return 0;
@@ -188,6 +198,9 @@ main()
     if (code !== 0) process.exit(code);
   })
   .catch((error: unknown) => {
-    console.error(`dsh-pet-standalone: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+    defaultLog(
+      'error',
+      `dsh-pet-standalone: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    );
     process.exit(1);
   });
