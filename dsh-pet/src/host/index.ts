@@ -1341,6 +1341,10 @@ export function apply(ctx: any): void {
   /** 用户动画根：按扩展名取子目录（main-animation/webm 或 main-animation/mov）。 */
   const userRootFor = (ext: string): string => join(thumbUserRoot, animSubdirFor(ext));
 
+  // 配置请求覆盖完整读改写：下一次更新必须读取前一次完成后的配置。
+  // GET /config 同样排队，避免写入尚未完成时读到空文件而回退内置默认。
+  let configQueue: Promise<void> = Promise.resolve();
+
   /** 单次业务路由(WebServer 注册 → HTTP 落盘 / 桌面 Helper 管道 → scheme 应答,共用同一份实现):
    *  输入只需 rawUrl(/dsh-pet-7340/... + 查询) + method + body 文本;返回 RouteResult(JSON/文本/文件),
    *  消费方各自落盘——业务逻辑只有一份,两端天然一致(硬契约:浏览器/桌面行为严格对齐)。
@@ -1354,7 +1358,25 @@ export function apply(ctx: any): void {
   ): Promise<RouteResult> => {
     const url = new URL(rawUrl, 'http://localhost');
     const rest = decodeURIComponent(url.pathname.slice(ROUTE_PREFIX.length + 1));
+    const run = (): Promise<RouteResult> => dispatchPetRoute(url, rest, method, body, signal);
+    if (rest === 'config' || (rest === 'pet-display' && method === 'POST')) {
+      const pending = configQueue.then(run, run);
+      configQueue = pending.then(
+        () => undefined,
+        () => undefined,
+      );
+      return pending;
+    }
+    return run();
+  };
 
+  const dispatchPetRoute = async (
+    url: URL,
+    rest: string,
+    method: string,
+    body?: string,
+    signal?: AbortSignal,
+  ): Promise<RouteResult> => {
     // 成品配置：/dsh-pet-7340/config（GET 读取合并成品 / PUT 保存用户层 / POST 同步内置默认）
     if (rest === 'config') {
       if (method === 'GET') {
