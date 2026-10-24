@@ -22,6 +22,9 @@ export { BUILTIN_PROVIDERS, listBalanceProviders, matchBalanceProvider, register
 /** 已登记的内置服务商（保持旧导出名：测试与既有调用方不受影响） */
 export const BALANCE_PROVIDERS = BUILTIN_PROVIDERS;
 
+/** 第三方取数的等待上限；内置 HTTP 服务商继续使用各自的超时与重试策略。 */
+const PLUGIN_FETCH_TIMEOUT_MS = 20_000;
+
 /**
  * 失败结果（三种 reason 一个出口，避免各处手写字段）。
  * `message` 缺省时**不写这个键** —— 叶子的形状是对外契约，多一个 `undefined` 键会让
@@ -59,10 +62,18 @@ export async function queryBalance(
   // 第三方注册的 provider 没有 credential：上下文里只有 provider ——
   // 宿主不解析 key，也不给 resolveAccount（给了等于允许它顺手查用户的 DSH 账号余额）。
   if (!('credential' in def)) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await def.fetch({ provider });
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('余额查询超时（20 秒），请稍后重试')), PLUGIN_FETCH_TIMEOUT_MS);
+        timer.unref();
+      });
+      // 只结束宿主等待，不宣称取消第三方请求；迟到的完成或拒绝由 race 消费，不再投递结果。
+      return await Promise.race([def.fetch({ provider }), timeout]);
     } catch (e) {
       return fetchFailed(provider, e);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
