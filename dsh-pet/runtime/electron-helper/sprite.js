@@ -15,8 +15,9 @@ const isOpenShortcut = (e) => !!(e && (e.ctrlKey || e.metaKey));
 
 // ---------- 点击音效（内置 assets/sound/click-duck.wav） ----------
 // 与浏览器端 client/pet.ts 同一套参数：单例 <audio>、音量 0.5、100ms 节流、失败静默。
-// URL 用 ORIGIN（http）而不是 BASE：BRIDGE 模式下 BASE 是自定义 scheme，CSP 的 media-src 不覆盖它。
-const CLICK_SOUND_URL = ORIGIN + '/dsh-pet-7340/sound/click-duck.wav';
+// 复用素材通道：bridge 模式由主进程取回音频，普通模式仍走 HTTP。
+// 自定义协议已声明 stream / bypassCSP，无需另开未经宿主鉴权的 HTTP 请求。
+const CLICK_SOUND_URL = BASE + '/sound/click-duck.wav';
 const CLICK_SOUND_VOLUME = 0.5;
 const CLICK_SOUND_THROTTLE_MS = 100;
 let clickAudio = null;
