@@ -2,7 +2,7 @@
  * host 工作状态纯逻辑单元测试 —— 钉住两件事：
  *   ① 「goal 自动续跑轮的中间轮 turn/end completed 不判成功」：
  *      中间轮 → result（不庆祝）；收尾轮 complete → success / blocked → error；非 goal 轮原行为不变。
- *   ② 任务详情文案与按会话聚合（issue #59）：多个 in_progress 取**最后**一个、清单全完成 → null、
+ *   ② 任务详情文案与按会话聚合（issue #59）：多个 in_progress 取最后一个、清单全完成 → null、
  *      超长按码点截断；WorkStatusStore 的 task 挂在会话条目上，展示时与 state 同源同会话，
  *      条目一清文案就消失（"任务结束后永久残留"的根治点）。
  *

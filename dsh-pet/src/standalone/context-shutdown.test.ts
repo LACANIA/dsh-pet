@@ -2,7 +2,7 @@
  * 独立模式伪 ctx 的「停机能力」测试（issue #178：托盘退出）。
  *
  * 纯函数层：`createStandaloneContext({ shutdown })` 必须把能力以 `shutdownApp` 挂到 ctx 上，
- * 且**只在传入时**挂——DSH 宿主用的是真 ctx，这条字段缺席正是「托盘不显示退出」的依据
+ * 且只在传入时挂——DSH 宿主用的是真 ctx，这条字段缺席正是「托盘不显示退出」的依据
  * （宿主路由 /quit 按 `typeof ctx.shutdownApp === 'function'` 判 canQuit）。
  *
  * 停机本身仍走 cli.ts 已有的 `/shutdown` 收尾，这里不重复测那条路径。

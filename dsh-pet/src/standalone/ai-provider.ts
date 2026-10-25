@@ -1,3 +1,11 @@
+/**
+ * 独立模式的 AI 服务：把成品配置、请求校验、限流与 SDK 流式调用组装成门面。
+ *
+ * 对外形状对齐宿主侧的 ctx.llm 与 agentDefaultModel，供插件路由无差别调用；
+ * 不负责设置持久化（见 ai-config），也不负责协议细节与鉴权头（见 ai-transport）。
+ * 必须始终成立：只有成品配置完整且未被暂停时才发起请求；对外只抛固定文案的错误。
+ * @module dsh-pet/src/standalone/ai-provider
+ */
 import { z } from 'zod';
 import type { StandaloneLogger } from './context';
 import { createAiConfig } from './ai-config';
@@ -5,17 +13,26 @@ import type { StandaloneAiPublicSettings } from './ai-config';
 import { isAuthenticationFailure, isRateLimitFailure, sdkTextStream } from './ai-transport';
 import type { AiFetch, AiRequest, AiTransportEvent } from './ai-transport';
 
+/** 伪 ctx 与模型选择器里的服务商标识。 */
 const PROVIDER = 'standalone';
+/** 单次输入的总字符上限。 */
 const MAX_INPUT_CHARS = 32_768;
+/** 单次输出的总字符上限。 */
 const MAX_OUTPUT_CHARS = 16_384;
+/** 单次响应的流事件上限。 */
 const MAX_EVENTS = 4096;
+/** 每分钟允许的请求数。 */
 const REQUESTS_PER_MINUTE = 6;
+/** 限流窗口长度，单位毫秒。 */
 const RATE_WINDOW_MS = 60_000;
+/** 文本块契约。 */
 const textBlock = z.object({ type: z.literal('text'), text: z.string().max(MAX_INPUT_CHARS) });
+/** 消息契约：只保留角色与受限内容。 */
 const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   content: z.union([z.string().max(MAX_INPUT_CHARS), z.array(z.unknown()).max(128)]),
 });
+/** 请求契约：服务商固定，模型必须与当前选择一致。 */
 const inputSchema = z.object({
   provider: z.literal(PROVIDER),
   model: z.string().max(200),
@@ -24,34 +41,55 @@ const inputSchema = z.object({
   signal: z.custom<AbortSignal>((value) => value instanceof AbortSignal).optional(),
 });
 
+/** 独立模式 AI 服务的对外形状。 */
 export interface StandaloneAiService {
+  /** 当前选中的服务商与模型；未就绪时模型为空。 */
   currentSelection(): { provider: string; model: string };
+  /** 就绪时返回唯一的 standalone 服务商。 */
   listProviders(): Array<{ id: string; name: string }>;
+  /** 就绪时返回当前模型，否则为空。 */
   listModels(provider: string): Promise<Array<{ id: string; name: string }>>;
+  /** 校验请求的模型是否就是当前配置的那个。 */
   resolveModelInfo(
     provider?: string,
     model?: string,
     signal?: AbortSignal,
   ): Promise<undefined | { id: string; name: string }>;
+  /** 以异步序列返回文本增量。 */
   stream(options: unknown): AsyncIterable<{ type: 'text'; text: string }>;
+  /** 取脱敏后的当前设置。 */
   getSettings(): StandaloneAiPublicSettings;
+  /** 校验并保存设置，成功后解除认证失败造成的暂停。 */
   saveSettings(input: unknown): Promise<StandaloneAiPublicSettings>;
+  /** 用一次最小请求验证地址、模型与密钥。 */
   testConnection(input: {
     protocol?: string;
     baseUrl?: string;
     model?: string;
     apiKey?: string;
   }): Promise<{ ok: boolean; message: string; reply?: string }>;
+  /** 是否满足发起请求的全部条件。 */
   isReady(): boolean;
+  /** 是否允许按间隔自动碎碎念。 */
   canWhisper(): boolean;
+  /** 终止在途请求并释放服务。 */
   dispose(): void;
 }
-/** Optional third argument is an isolated transport/clock seam; production uses official SDKs. */
+/** 可注入的传输与时钟，仅供测试替换；生产使用官方 SDK 与真实时间。 */
 export interface StandaloneAiDependencies {
+  /** 替换 fetch 以隔离网络。 */
   fetch?: AiFetch;
+  /** 替换时钟以控制限流窗口。 */
   now?: () => number;
 }
 
+/**
+ * 把调用方输入收敛为纯文本消息。
+ * @param options - 调用方请求。
+ * @param model - 当前选中的模型。
+ * @returns 规范化请求与可选的取消信号。
+ * @throws 输入越界、角色顺序不合法或模型不匹配时抛出。
+ */
 function parseRequest(options: unknown, model: string): { request: AiRequest; signal?: AbortSignal } {
   const parsed = inputSchema.safeParse(options);
   if (!parsed.success || parsed.data.model !== model)
@@ -65,7 +103,7 @@ function parseRequest(options: unknown, model: string): { request: AiRequest; si
           ? message.content
           : message.content
               .map((block) => {
-                // Unknown/non-text blocks and DSH source metadata never cross the API boundary.
+                // 非文本块与 DSH 来源元数据不进入请求：服务商只该看到文本。
                 if (typeof block !== 'object' || block === null || !('type' in block) || block.type !== 'text')
                   return '';
                 const result = textBlock.safeParse(block);
@@ -88,6 +126,7 @@ function parseRequest(options: unknown, model: string): { request: AiRequest; si
   return { request: { system, messages }, signal: data.signal };
 }
 
+/** 让等待中的读取也能响应取消。 */
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(new Error('Standalone AI request cancelled.'));
   return new Promise<T>((resolve, reject) => {
@@ -97,6 +136,14 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/**
+ * 创建独立模式 AI 服务。
+ * @param home - DSH_HOME。
+ * @param logger - 日志出口。
+ * @param dependencies - 测试注入的传输与时钟。
+ * @returns AI 服务。
+ * @throws 设置无法安全读取时抛出。
+ */
 export function createStandaloneAi(
   home: string,
   logger: StandaloneLogger,
@@ -107,7 +154,7 @@ export function createStandaloneAi(
     store = createAiConfig(home);
   } catch {
     logger.error('Cannot securely load standalone AI settings.');
-    // Corrupt/insecure persistence must never enable ambient or old credentials.
+    // 持久化损坏或权限不安全时不能顺势启用环境里的旧凭据，宁可整体失败。
     throw new Error('Cannot securely load standalone AI settings.');
   }
   const fetcher = dependencies.fetch ?? globalThis.fetch.bind(globalThis);
@@ -147,8 +194,10 @@ export function createStandaloneAi(
     try {
       while (true) {
         const part: IteratorResult<AiTransportEvent> = await abortable(iterator.next(), controller.signal);
+        // 流式过程中设置可能被保存、服务也可能被释放，每次都重新确认。
         if (controller.signal.aborted || !ready()) throw new Error('Standalone AI request cancelled.');
         if (part.done) break;
+        // 事件数也要有上限，防止对端用大量空块拖住进程。
         if (++events > MAX_EVENTS) throw new Error('Standalone AI response exceeds limits.');
         if (part.value.refusal) throw new Error('Standalone AI could not answer this request.');
         const text = part.value.text;
@@ -172,7 +221,7 @@ export function createStandaloneAi(
       if (isRateLimitFailure(error)) {
         throw new Error('Standalone AI provider rate limit reached. Please wait.', { cause: error });
       }
-      // Only our fixed messages are safe; never propagate SDK errors, URLs, headers, or bodies.
+      // 只放行本层写的固定文案；SDK 错误可能带地址、请求头或正文。
       if (
         error instanceof Error &&
         [
@@ -189,7 +238,7 @@ export function createStandaloneAi(
       callerSignal?.removeEventListener('abort', abort);
       controller.abort();
       if (active === controller) active = undefined;
-      // return() may await a pending transport read. Observe it, but never block cancellation.
+      // return() 可能等待挂起的读取；只观察结果，绝不阻塞取消。
       void iterator.return?.().catch(() => logger.debug('Standalone AI transport closed.'));
     }
   }
@@ -209,6 +258,7 @@ export function createStandaloneAi(
       if (disposed) throw new Error('Standalone AI is disposed.');
       if (saving) throw new Error('Standalone AI settings are being saved.');
       saving = true;
+      // 保存期间先中止在途请求，避免旧设置继续产生输出。
       active?.abort();
       try {
         const result = await store.save(input);
@@ -253,6 +303,7 @@ export function createStandaloneAi(
       };
 
       const controller = new AbortController();
+      // 测试连接不复用正式通道：不污染限流、忙状态与暂停标记。
       const timer = setTimeout(() => controller.abort(), 15_000);
       try {
         const testStream = sdkTextStream(

@@ -1,37 +1,14 @@
 /**
- * dsh-pet desktop helper —— Electron 主进程
- *
- * 职责：为**每只桌面宠物**开一个独立的局部小窗口（透明、置顶、不可激活），
- * 窗口 = 宠物包围盒 + 四周外扩余量（renderer 的 WINDOW_MARGIN_RATIO，为气泡/弹窗预留空间），
- * 宠物移动时 renderer 逐帧上报 bounds，本进程 setContentBounds 让窗口跟随宠物。
- *
- * 为什么是「局部小窗口」而不是「全屏透明画布」：全屏透明置顶窗会触发 Windows DWM 视频合成黑屏
- * （播放中的视频画面变黑、声音继续）。触发与窗口**绝对尺寸无关**，需四项齐备：透明置顶 + 非点击穿透
- * + 可聚焦且已聚焦 + **完整盖住视频窗**（98% 覆盖即安全；一个仅占屏幕 26% 的小窗同样能触发，issue #60
- * 的单变量实测矩阵）。本进程恰好会凑齐前三项——悬停宠物即整窗翻成可交互、show() 出去的窗口本就是
- * 聚焦的——而全屏画布又把第四项白送（必然完整遮挡非全屏播放的视频），故"不做全屏画布"的结论不变，
- * 只是理由换成这套条件；现有形态靠**默认整窗穿透 + 小窗几乎不可能完整遮挡视频窗**规避。
- * （旧注释写作"窗口不全屏就不黑"，那是把 0.1.x 的「全屏画布 → 每宠小窗」与输入模型改造这两件
- * 同时发生的事，混成了一个自变量。）
- * 输入：窗口默认**整窗点击穿透**（setIgnoreMouseEvents(true,{forward:true})），渲染端在光标
- * 进/出宠物身体命中区时经 pet:set-interactive 翻转可交互——透明像素不挡下层应用，
- * 与浏览器 overlay（仅 .dsh-pet-hit 可交互）严格对齐。
- *
- * 数据通道（bridge 模式，DSH_PET_BRIDGE=1 由宿主注入）：
- * 渲染端不再直连宿主 WebServer（DSH Desktop 2.0.3+ 的浏览器访问闸门会拦无令牌裸 HTTP）——
- * 本进程注册自定义 scheme `dsh-pet-bridge://`，protocol.handle 收到渲染端请求后
- * 经 stdin/stdout JSON 行协议转发宿主（helper-process.ts 的 BridgeHandler），
- * 宿主用与 HTTP 路由同一份 handlePetRoute 应答；素材应答带文件绝对路径，本进程读盘返回。
- * 无 DSH_PET_BRIDGE（手动 start-desktop / 开发流）时保持旧路径：渲染端直接 HTTP 访问宿主。
- *
- * 进程存亡（issue #56）：本进程的 stdout/stderr 是宿主给的管道，宿主一退出读端就消失（下一次写
- * 就是 EPIPE，而 Electron 默认处理器只会弹框且不退出）。故有「宿主存活」一节：管道守卫 +
- * 宿主 PID 探测，宿主没了就自己退——见那里的注释。
- *
- * 启动模式（issue #63）：若被以「纯 Node 模式」拉起（宿主透传了 ELECTRON_RUN_AS_NODE），内置
- * electron 模块不会注册，下面的 require 会失败——报一句能定位原因的话再退出，别只留 MODULE_NOT_FOUND。
+ * dsh-pet 桌面 Helper 主进程：每只桌面宠物一个透明置顶小窗，窗口跟随渲染端上报的包围盒移动，进程内
+ * 还负责托盘、bridge 数据转发与宿主存活判定；不负责渲染与命中判定（renderer.js / sprite.js）。
+ * 必须保持局部小窗：Windows DWM 视频黑屏需四项同时成立——透明置顶、非点击穿透、可聚焦且已聚焦、
+ * 完整盖住视频窗；本进程恰好凑齐前三项，小窗则几乎不可能满足第四项，且默认整窗点击穿透。
+ * 依赖宿主注入的环境变量与同目录的纯判定模块。
+ * @module dsh-pet/runtime/electron-helper/main
  */
 let electronApi;
+// 被以「纯 Node 模式」拉起（宿主透传 ELECTRON_RUN_AS_NODE）时内置 electron 模块不会注册：
+// 报一句能定位原因的话再退出，别只留 MODULE_NOT_FOUND。
 try {
   electronApi = require('electron');
 } catch (error) {
@@ -51,11 +28,10 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { readFileSync, writeFileSync } = require('node:fs');
 const fsPromises = require('node:fs/promises');
-// 点击穿透兜底通道的纯判定（不依赖 Electron 的 forward 鼠标钩子；见文件头注释）
+// 点击穿透兜底通道的纯判定（不依赖 Electron 的 forward 鼠标钩子；见文件头）
 const { decideWindowIgnore, pointerZone } = require('./pointer-target.js');
-// Linux 专用：X11 指针实时查询（见 x11-pointer.js 文件头）。桌面宠物窗口在穿透状态下收不到
-// 任何鼠标事件，Chromium 的 screen.getCursorScreenPoint() 在 X11 上会因此冻结在旧坐标——
-// 兜底轮询拿着陈旧坐标算，宠物永远翻不成可交互。这里直接问 X server。
+// Linux 专用：X11 指针实时查询。穿透窗收不到鼠标事件，Chromium 的 screen.getCursorScreenPoint()
+// 在 X11 上会冻结在旧坐标，兜底轮询必须直接问 X server（见 x11-pointer.js）。
 const { createLinuxPointer } = require('./x11-pointer.js');
 // 置顶看门狗：WS_EX_TOPMOST 只是样式位，不等于窗口真的在置顶带（见 topmost-watchdog.js 头部）
 const {
@@ -64,9 +40,9 @@ const {
   shouldReassertTopmost,
   topmostLevel,
 } = require('./topmost-watchdog.js');
-// 宿主存活判定（issue #56：宿主退出 → 管道断开 → 自己退，绝不弹框、绝不留僵尸）
+// 宿主存活判定：宿主退出 → 管道断开 → 自己退，绝不弹框、绝不留僵尸
 const { HOST_POLL_MS, hostIsGone, isBrokenPipeError, parseHostPid } = require('./host-liveness.js');
-// 全局 DPI 线性化的纯判定与换算（含平台例外：macOS 的 DIP 已是「点」，无需补偿；见该文件头）
+// 全局 DPI 线性化的纯判定与换算（平台例外见该文件头）
 const { shouldLinearize, resolveForcedScale, resolvePetScale } = require('./dpi-linearization.js');
 // 托盘的平台差异（模板图 / 左键是否自动弹菜单 / Dock）：规则住在模块里，main.js 只接线
 const { trayPlatform } = require('./tray-platform.js');
@@ -89,28 +65,22 @@ function currentPointer() {
 // 允许无用户手势直接播放（余额动画等）
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
-// 显式定名：Helper 是被 `electron.exe <main.js>` 直接拉起的，Electron 取不到 app 名会回落成
-// "Electron"，userData 便落到 %APPDATA%\Electron —— 那是所有这么跑的 Electron 脚本的公共目录，
-// 我们的 DPI 缓存与 Chromium profile 都会和别人混在一起。必须赶在任何 getPath('userData') 之前设。
-// 应用模式：本文件被 `src/app/main.ts` 直接 import 进同一进程（独立应用，不 spawn 子进程）。
-// 双击启动的用户没有终端可按 Ctrl+C，托盘上必须有一个「退出」，否则只能去任务管理器杀进程。
-// 退出项不只给独立应用（issue #178）：手动 start-desktop 流同样没有终端；BRIDGE 模式则由宿主
-// 决定能不能退（GET /quit 探 canQuit，DSH 宿主答 false）。见 startTray 里的 quitApp。
-// DSH 内的桌面模式不设这个变量，托盘形态与 userData 目录都保持原样。
+// 显式定名：Helper 被 `electron.exe <main.js>` 直接拉起时取不到 app 名，会回落成 "Electron"，
+// userData 便落到 %APPDATA%\Electron 这个公共目录，DPI 缓存与 Chromium profile 会和别人混在一起。
+// 必须赶在任何 getPath('userData') 之前设；名字必须与 src/host/storage-paths.ts 的 DESKTOP_APP_NAME
+// 逐字一致（测试直接读本文件比对，改名不同步就红）。
+// 应用模式（本文件被 src/app/main.ts 同进程 require）：双击启动的用户没有终端，托盘必须有「退出」；
+// 手动 start-desktop 流同理，BRIDGE 模式则由宿主决定能否退（见 startTray 的 quitApp）。
 const APP_MODE = process.env.DSH_PET_APP_MODE === '1';
-// Captured only for in-process app requests; never exposed to renderer URLs or logs.
+// 只供同进程应用自己的请求使用，绝不出现在渲染端地址或日志里。
 const APP_TOKEN = APP_MODE ? process.env.DSH_PET_APP_TOKEN : undefined;
-// 名字必须与 src/host/storage-paths.ts 的 DESKTOP_APP_NAME 逐字一致
-// （storage-paths.test.ts 会直接读本文件比对，改名不同步测试就红）。
 app.setName('dsh-pet-electron-helper');
-// Windows 任务栏分组（#193 后续）：不设 AppUserModelID 时 Shell 把窗口归到 electron.exe 名下，
-// 任务栏按钮一旦意外出现就显示 Electron 默认图标。设成自己的 ID 后至少归到本应用、图标走窗口 icon。
-// 必须在 ready 之前调用；独立应用与 DSH 内 helper 用不同 ID，避免两边同时运行时被合成一组。
+// Windows 任务栏分组：不设 AppUserModelID 时窗口归到 electron.exe 名下，任务栏按钮意外出现就显示
+// Electron 默认图标。必须在 ready 之前调用；独立应用与 DSH 内 helper 用不同 ID，避免被合成一组。
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_MODE ? 'com.dsh.pet.app' : 'com.dsh.pet.helper');
 }
-// 应用模式只改**数据目录**，不改应用名：独立应用与 DSH 内的 helper 若共用同一个 userData，
-// 两个 Chromium 进程会抢同一份 profile（单例锁）互相踢。名字不动也就不会触发上面那个防漂移测试。
+// 应用模式只改数据目录、不改应用名：共用同一个 userData 时两个 Chromium 进程会抢同一份 profile 互踢。
 if (APP_MODE) app.setPath('userData', path.join(app.getPath('appData'), 'dsh-pet'));
 
 /** DPI 探测子进程模式：不建窗口，只把主屏 scaleFactor 打到 stdout 就退出（见 probePrimaryScale） */
@@ -118,39 +88,29 @@ const DPI_PROBE = process.env.DSH_PET_DPI_PROBE === '1';
 /** 探测进程的输出标记（父进程按它抓值） */
 const DPI_MARK = 'dsh-pet-primary-scale:';
 
-// ---------- 宿主存活（issue #56）：管道断开 / 父进程消失 → 自己退出 ----------
-//
-// 【为什么必须自己退】宿主退出后，它在 helper 的 stdout/stderr 上握着的管道读端一起关闭；helper
-// 下一次写（bridge 协议行 —— 渲染端每秒至少一条 /state 轮询）拿到 EPIPE。未处理的 'error'
-// 事件 = 未捕获异常，而 Electron 主进程自带的处理器只弹一个模态框、**且不退出**
-// （lib/browser/init.ts 原文注释："Don't quit on fatal error"）—— 桌宠就此卡死、进程赖着不走。
-// 真机实测（宿主存活、只切断 stdout 管道）：那次写之后主线程彻底停住，14 秒里一次心跳都没有，
-// 进程也一直没有退出。
-//
-// 两条路都要有，缺一不可：
-//   ① 管道守卫：任何一次写失败都不许变成异常；管道断开本身就是"宿主已死"的铁证 → 立刻退。
-//      它只在**上层真的写**的时候才触发；
-//   ② 宿主探测：每 HOST_POLL_MS 用 kill(pid, 0) 问一次宿主还在不在，ESRCH 即退。
-//      渲染端崩了/根本没起来时一次写都不会发生，只有 ② 能收敛。
-// 两条路都只经 exitForDeadHost()，且只退一次。
+// 宿主存活：宿主退出后 stdout/stderr 的读端一起消失，helper 下一次写（每秒至少一条 /state 轮询）
+// 拿到 EPIPE；未处理的流错误会成为未捕获异常，而 Electron 的默认处理器只弹框、不退出——桌宠就此
+// 卡死、进程赖着不走。两条路缺一不可：① 管道守卫，任何一次写失败都不许变成异常，断开即退（只在
+// 上层真的写时触发）；② 宿主探测，每 HOST_POLL_MS 用 kill(pid, 0) 问一次，ESRCH 即退（渲染端
+// 崩了或根本没起来时一次写都不会发生，只有它能收敛）。两条路都只经 exitForDeadHost()，且只退一次。
 let hostGone = false;
-/** 宿主没了 → 立刻退出。这里**不能**再打日志：管道已经断了，写只会再踩一次同一个错误 */
+/** 宿主没了 → 立刻退出。这里不能再打日志：管道已断，写只会再踩同一个错误。 */
 function exitForDeadHost() {
   if (hostGone) return;
   hostGone = true;
   app.exit(0); // 宿主消失是"环境要求我退"，不是自身崩溃，退出码 0
 }
 
-// ① 管道守卫：必须赶在**任何一次写**之前装上（probePrimaryScale 失败就会往 stderr 写）
+// ① 管道守卫必须赶在任何一次写之前装上（probePrimaryScale 失败就会往 stderr 写）
 for (const stream of [process.stdout, process.stderr]) {
   stream.on('error', (error) => {
     if (isBrokenPipeError(error)) exitForDeadHost();
-    // 其余流错误同样吞掉：Electron 的默认处理是弹模态框，任何流错误都不值得拿桌宠去换一个框
+    // 其余流错误同样吞掉：Electron 的默认处理是弹模态框，不值得拿桌宠去换一个框
   });
 }
 
-// ② 宿主探测：DSH_PET_HOST_PID 由宿主 spawn 时注入；未注入/非法 → parseHostPid 给 0 → 不探测（不误退）。
-// DPI 探测实例是一次性短命进程（它的父进程是 helper 而不是宿主），不参与这套机制。
+// ② 宿主探测：DSH_PET_HOST_PID 由宿主 spawn 时注入；未注入或非法 → 0 → 不探测（不误退）。
+// DPI 探测实例是一次性短命进程（父进程是 helper 而不是宿主），不参与这套机制。
 const HOST_PID = parseHostPid(process.env.DSH_PET_HOST_PID);
 if (!DPI_PROBE && HOST_PID > 0) {
   setInterval(() => {
@@ -158,66 +118,25 @@ if (!DPI_PROBE && HOST_PID > 0) {
   }, HOST_POLL_MS).unref?.();
 }
 
-// Windows 透明分层窗口（WS_EX_LAYERED）在 DWM 硬件加速合成下存在多处缺陷：
-//   - 拖拽移动时窗口四周出现黑色边框（#37）
-//   - 大透明窗移动覆盖小透明窗时，被覆盖窗口内容丢失（显示"消失"）
-// 本进程只渲染轻量宠物动画（640×360），改走软件合成以规避上述缺陷，
-// 不影响浏览器形态与主 DSH（独立进程）；非 Windows（macOS/Linux）合成路径不同，保留硬件加速。
+// Windows 透明分层窗口（WS_EX_LAYERED）在 DWM 硬件加速合成下有缺陷：拖拽移动时窗口四周出现黑边、
+// 大透明窗移动覆盖小透明窗时后者内容丢失。本进程只渲染轻量宠物动画（640×360），改走软件合成；
+// 非 Windows 合成路径不同，保留硬件加速。
 if (process.platform === 'win32') {
   app.disableHardwareAcceleration();
-  // disableHardwareAcceleration() 只关硬件 GL，**并不会去掉 Chromium 的 GPU 进程**：
-  // 机器上装了虚拟显示器（ToDesk / GameViewer / MuMu / 远程桌面 IDD 之类）时，GPU 进程的
-  // 沙箱在初始化阶段会以 STATUS_BREAKPOINT(0x80000003) 反复崩掉，随后浏览器进程直接
-  //   FATAL:gpu_data_manager_impl_private.cc:416] GPU process isn't usable. Goodbye.
-  // 以 0x80000003(2147483651) 退出 —— helper 每起必崩、桌面宠物永远不出现，宿主侧只能看到
-  // 一行无信息量的 "helper exited (code=2147483651)"，最后被熔断逻辑彻底放弃。
-  // 关掉 GPU 沙箱即可恢复（实测：单独 --disable-gpu / --use-angle=swiftshader 均无效，
-  // --disable-gpu-sandbox 与 --in-process-gpu 有效；这里选前者，对渲染路径改动最小）。
-  // 本进程只渲染本地素材、不加载任何不可信内容，放宽 GPU 沙箱是可接受的代价；
-  // 需要保留沙箱的环境可设 DSH_PET_GPU_SANDBOX=1。
+  // 它只关硬件 GL、不会去掉 Chromium 的 GPU 进程：装了虚拟显示器（ToDesk / 远程桌面 IDD 之类）时，
+  // GPU 进程沙箱会在初始化阶段以 STATUS_BREAKPOINT 反复崩掉，浏览器进程随即以 0x80000003 退出，
+  // helper 每起必崩而宿主只看到一行无信息量的退出码。关掉 GPU 沙箱即可恢复（单测过：
+  // --disable-gpu 与 --use-angle 无效，--disable-gpu-sandbox 有效）。本进程只渲染本地素材、
+  // 不加载不可信内容；需要保留沙箱的环境设 DSH_PET_GPU_SANDBOX=1。
   if (process.env.DSH_PET_GPU_SANDBOX !== '1') {
     app.commandLine.appendSwitch('disable-gpu-sandbox');
   }
 }
 
-// ---------- 全局 DPI 线性化（多显示器异构缩放的根因修复） ----------
-//
-// Windows 上 Chromium 的 DIP↔物理 换算是**逐显示器**的仿射变换，而且
-// ScreenWin::DIPToScreenRect(hwnd, rect) 用的是「hwnd 当前归属屏」的那一组参数：
-//   physical = (dip − D.dipOrigin) × D.scale + D.pixelOrigin
-// 归属由 MonitorFromWindow(MONITOR_DEFAULTTONEAREST) 按面积占比决定，窗口骑缝时会反复翻转。
-// 两屏缩放不同时，同一个 DIP 值在翻转前后落到不同物理位置、算出不同物理尺寸
-// （实测 1.5/1.75 双屏：位置差 110px、924 DIP 宽的窗口尺寸差 231px），
-// 于是 setContentBounds 每帧的落点在两套坐标系之间横跳 —— 这就是拖过屏缝时的「分身闪烁」，
-// 也是两屏缩放一致时同样骑缝却毫无问题的原因。
-//
-// --force-device-scale-factor 让 Chromium 的 GetMonitorScaleFactors() 对所有显示器
-// 直接返回同一个值，全部屏塌缩成**同一个**仿射变换 ⇒ DIPToScreenRect 的结果与窗口归属无关。
-//
-// 取值必须是 **1**，不能取主屏的 scaleFactor。实测（tools/probe-dpi.cjs，1.5 + 1.75 双屏）：
-//   forced=1.5 → display.bounds 被二次缩放（主屏物理 3840 宽报成 1706 = 3840/1.5/1.5，
-//                而同一块屏的 workArea 报 2560 = 3840/1.5，两者自相矛盾）。
-//                DIPToScreenPoint 用 bounds.origin() 当 dipOrigin，于是
-//                pixelOrigin(3840) ≠ dipOrigin(1706)×1.5，副屏多出 1281px 的**恒定**偏移——
-//                比不加 switch 时的 75px 还糟。
-//   forced=1   → bounds 与 workArea 一致，每块屏都满足 pixelOrigin == dipOrigin×scale，
-//                DIP 与物理像素成为恒等映射，探针的 DELTA 全 0（尺寸差 231×151 也一并归零）。
-// 所以这里锁死 1：坐标系 = Windows 物理像素，跨屏几何再无换算与舍入。
-//
-// 代价：宠物尺寸的单位从 DIP 变成物理像素，不补偿的话在 150% 的屏上会小 1/1.5。
-// 用探测到的**真实主屏 scaleFactor** 乘进渲染端的 CONFIG.scale 抵掉（见 petScale()）——
-// 主屏上的观感与修复前逐像素相同；其余屏改按主屏缩放渲染宠物（同尺寸同分辨率的两块屏上
-// 物理大小反而一致了）。探测失败就整个不启用，退回修复前行为，不做没有补偿的缩放。
-//
-// 环境变量 DSH_PET_FORCE_DSF：'0' = 关闭本机制；其它正数 = 强制该值（排障用，会踩上面的 bug）。
-//
-// 「要不要启用 / 强制成几 / 渲染端乘几」三条规则已抽到 dpi-linearization.js（纯函数、带单测）——
-// 其中包含一个平台例外：上面这套补偿的前提是「force-device-scale-factor 会把 DIP 换算成物理像素」，
-// 那是 Windows 的行为，macOS 上不成立。原因与实测数据见该文件头，本文件不再复述。
-//
-// 取值时机是个麻烦：switch 必须在 app ready 之前设，而那时 screen 模块还不可用。
-// 所以首次启动 spawn 一个自己的探测子进程（DSH_PET_DPI_PROBE=1，只打印 scaleFactor 就退出，
-// ~0.5s）并把结果落盘；之后每次启动直接读缓存，零开销。
+// 全局 DPI 线性化：所有显示器强制同一 scale factor——逐屏仿射变换会在拖过屏缝时反复翻转
+// （「分身闪烁」）。取值必须锁死 1，不能用主屏 scaleFactor（实测 forced=1.5 会让 bounds 与
+// workArea 自相矛盾）；代价是尺寸单位变成物理像素，靠探测到的 scaleFactor 乘进 CONFIG.scale 抵掉，
+// 探测失败就不启用。平台规则见 dpi-linearization.js，本文件只接线。
 
 /** 主屏缩放缓存文件（userData 在 ready 前即可用） */
 function dpiCacheFile() {
@@ -261,8 +180,8 @@ function probePrimaryScale() {
   try {
     out = execFileSync(process.execPath, [__filename, '--dsh-pet-dpi-probe'], opts);
   } catch (e) {
-    // 只认 stdout，不认退出码：一个不开窗口的 Electron 进程调 app.exit() 在 Windows 上
-    // 偶发 0xC0000005（退出期访问违例），但那时值早就写出来了，丢掉它纯属浪费一次冷启动。
+    // 只认 stdout，不认退出码：不开窗口的 Electron 进程调 app.exit() 在 Windows 上偶发
+    // 0xC0000005（退出期访问违例），但那时值早就写出来了，丢掉它纯属浪费一次冷启动。
     out = e && e.stdout ? String(e.stdout) : '';
     if (!parseProbeOutput(out)) {
       const detail = [
@@ -276,7 +195,7 @@ function probePrimaryScale() {
         String(e && e.message ? e.message : e).split('\n')[0],
         detail,
       );
-      return 0; // 探测失败：不加 switch，退回修复前行为（多屏异构 DPI 会闪，但不影响可用性）
+      return 0; // 探测失败：不加 switch，退回逐屏 DIP 行为
     }
   }
   const v = parseProbeOutput(out);
@@ -341,21 +260,17 @@ if (BRIDGE) {
 /** 窗口表：petId -> BrowserWindow */
 const windows = new Map();
 
-/** win.id -> 上一次**请求**的内容区矩形（"x,y,w,h"）：pet:set-bounds 的去重基准，见那里的注释 */
+/** win.id -> 上一次请求的内容区矩形（"x,y,w,h"）：pet:set-bounds 的去重基准 */
 const lastRequestedBounds = new Map();
 
-/**
- * win.id -> 渲染端上报的窗口余量 `{ l, t }`（DIP）。
- * 上边距按气泡最大高度加高后**余量不再四边相等**，命中区不能再按「窗口宽/4」反推——
- * 这里存下来交给 pointer-target 的 spriteHitRect（见那里的注释）。
- */
+/** win.id -> 渲染端上报的窗口余量 `{ l, t }`（DIP）：上边距按气泡最大高度加高后余量不再四边相等，
+ *  命中区不能按「窗口宽/4」反推，所以存下来交给 pointer-target 的 spriteHitRect */
 const winMargins = new Map();
 
 /**
  * 宠物间碰撞 broker 状态：petId -> { x, y, vx, vy, size, bottomPad }。
- * 来源：pet:set-bounds（位置+尺寸+速度，随漫游/拖拽/静止保真上报，每帧一次）+
- *       pet:report-flight（飞行中每 ~30ms 高频补充速度）。
- * 任何更新都广播全量给所有窗口——每窗飞行方用它做跨窗碰撞检测（滞后 ≤ 1 帧，可接受）。
+ * 来源是 pet:set-bounds（每帧全量）与 pet:report-flight（飞行中每 ~30ms 补速度）；
+ * 任何更新都广播全量给所有窗口，飞行方据此做跨窗碰撞检测（滞后 ≤ 1 帧，可接受）。
  */
 const petStates = new Map();
 
@@ -377,34 +292,26 @@ function updatePetState(petId, partial) {
   broadcastPetStates();
 }
 
-/**
- * 每窗口当前穿透状态（true = 整窗点击穿透）。所有 setIgnoreMouseEvents 只经本文件
- * （创建时初始化 + pet:set-interactive 翻转 + 光标兜底轮询），这里镜像真实状态，供冒烟断言/排查使用
- * （Electron 无 isIgnoringMouseEvents 取值 API）。
- */
+/** 每窗口当前穿透状态的镜像（Electron 没有取值 API）：所有翻转都经 setWindowIgnore，供冒烟断言/排查 */
 const windowIgnore = new Map();
 
-/** 翻转整窗穿透的**唯一出口**：状态与 windowIgnore 镜像永远一起更新（穿透期间保留 forward） */
+/** 翻转整窗穿透的唯一出口：状态与镜像永远一起更新（穿透期间保留 forward） */
 function setWindowIgnore(win, ignore) {
   win.setIgnoreMouseEvents(ignore, { forward: true });
   windowIgnore.set(win.id, ignore);
 }
 
-/** 兜底通道的光标轮询间隔（ms，与 issue #55 报告者实测值一致） */
+/** 兜底通道的光标轮询间隔（ms） */
 const POINTER_POLL_MS = 60;
-/** 冒烟期间暂停兜底轮询：它按**真实光标**翻转 windowIgnore，会干扰冒烟对渲染端通道的断言 */
+/** 冒烟期间暂停兜底轮询：它按真实光标翻转 windowIgnore，会干扰冒烟对渲染端通道的断言 */
 let pointerFallbackPaused = false;
 
 /**
  * 每窗口「渲染端正拿着鼠标输入」标记（win.id → true/false），由渲染端经 `pet:input-busy` 上报。
  *
- * 为什么必须由渲染端说了算：兜底通道判定的是"光标与**窗口矩形**"的关系，而窗口矩形比宠物身体大
- * 一圈（四周各半只宠物的余量）。拖拽时宠物由 rAF 弹簧追赶光标、**滞后**于光标；甩得快时滞后量
- * 超过那一圈余量，光标就落在矩形外 → 判成"窗外" → 翻回穿透 → 渲染端正在拖拽的 window 级
- * pointermove/pointerup 全断（鼠标还按着，宠物却按旧速度"飞"出去，连松手都没人报）。
- *
- * 主进程**无法自行判断**这件事（光看光标位置和窗口位移分不清"拖拽跟手"与"漫游/抛掷"），
- * 而渲染端知道（拖拽中 / 菜单开着 / 对话弹窗开着）。所以只由它上报，busy 期间本进程绝不翻回穿透。
+ * 必须由渲染端说了算：兜底通道判定的是光标与窗口矩形的关系，而窗口比宠物身体大一圈；拖拽时宠物
+ * 滞后于光标，甩得快时光标先出窗，翻回穿透就会断掉正在用的 pointermove/pointerup。主进程光看
+ * 光标位置与窗口位移分不清拖拽跟手与漫游/抛掷，所以 busy 期间本进程绝不翻回穿透。
  */
 const inputBusy = new Map();
 /** 新渲染端把菜单/聊天框局部矩形单独上报，避免忙碌态下整窗透明余量吞点击。 */
@@ -414,12 +321,10 @@ const inputRegions = new Map();
 const offBodyMs = new Map();
 
 /**
- * 桌面宠物列表（[{id,size}]）：宿主经 DSH_PET_PETS 透传（每只宠物一个窗口）。
- * 解析失败/未透传（手动 start-desktop）时回落到单个默认宠物窗口；renderer 首帧发来的
- * set-bounds 会按真实配置自校正尺寸与位置。
- * **空数组是合法输入，不等于「未透传」**：宿主在「桌面宠物被全部关掉、但 Helper 仍需活着
- * 托住托盘」时会明确传 []（见 src/host/index.ts 的 desktopModeEverActive），此时必须建
- * 0 个窗口——回落成默认窗口会让渲染端读到「没有 desktop/both 宠物」并弹出红色错误条。
+ * 桌面宠物列表（[{id,size}]）：宿主经 DSH_PET_PETS 透传，每只宠物一个窗口。
+ * 解析失败或未透传（手动 start-desktop）时回落到单个默认窗口，渲染端首帧会按真实配置自校正。
+ * 空数组是合法输入、不等于未透传：宿主在「桌面宠物全关掉但仍需托住托盘」时会明确传 []，
+ * 此时必须建 0 个窗口——回落成默认窗口会让渲染端读到「没有桌面宠物」并弹出错误条。
  */
 function petsFromEnv() {
   try {
@@ -438,8 +343,8 @@ function petsFromEnv() {
   return [{ id: 'main', size: 462, index: 0 }];
 }
 
-/** 窗口初始尺寸 = 宠物包围盒 + 四周外扩余量（4×0.5×size，与 renderer 的 WINDOW_MARGIN_RATIO 一致；
- *  renderer 首帧 set-bounds 会按真实配置精确覆盖，这里只是避免启动瞬间的尺寸跳变）。 */
+/** 窗口初始尺寸 = 宠物包围盒 + 四周外扩余量；渲染端首帧 set-bounds 会按真实配置精确覆盖，
+ *  这里只是避免启动瞬间的尺寸跳变。 */
 function petWindowSize(size) {
   const height = (size * 9) / 16;
   const bottomPad = (size * (9 / 16) * (360 - 330)) / 360;
@@ -448,12 +353,11 @@ function petWindowSize(size) {
 }
 
 /**
- * 把窗口从任务栏摘掉（#193 后续：合盖/唤醒后任务栏冒出 Electron 默认图标）。
+ * 把窗口从任务栏摘掉（合盖/唤醒后任务栏会冒出 Electron 默认图标）。
  *
- * `skipTaskbar: true` 只在建窗时生效一次。Windows 在唤醒、显示器拓扑变化后会让 Shell 重新
- * 枚举顶层窗口：窗口重新 show 时任务栏按钮会被重建，而这次重建不保证再被摘掉。所以凡是
- * 「窗口可能重新出现」的时机都要再摘一次。show() 内部重建按钮是异步的——紧跟一个 0ms 的
- * 第二次调用才算数（只调一次仍会残留按钮）。
+ * skipTaskbar 只在建窗时生效一次；Windows 在唤醒、显示器拓扑变化后会让 Shell 重新枚举顶层窗口，
+ * 窗口重新 show 时任务栏按钮会被重建且不保证再被摘掉。show() 内部重建按钮是异步的，紧跟一个
+ * 0ms 的第二次调用才算数（只调一次仍会残留按钮），所以凡是窗口可能重新出现的时机都要再摘一次。
  */
 function keepOffTaskbar(win) {
   if (!win || win.isDestroyed()) return;
@@ -464,12 +368,11 @@ function keepOffTaskbar(win) {
 }
 
 /**
- * 桌面几何：**逐显示器的工作区列表** + 它们的外接矩形 + 主屏下标。
+ * 桌面几何：逐显示器的工作区列表 + 它们的外接矩形 + 主屏下标（屏幕坐标）。
  *
- * 外接矩形（hull）仍然是渲染端视口 VIEW 的来源——它只用作坐标系原点与比例换算基准。
- * 但所有边界判定（漫游落点 / 抛掷反弹 / 角落定位 / 菜单夹取）必须走 areas 的**并集**：
- * 显示器摆放不规则时 hull 里会有大片不属于任何屏的空洞，以 hull 为边界会把宠物放进去
- * （实测右倒 T 型双屏：hull 的 23.7% 是空洞，宠物飞进去就彻底看不见了）。
+ * hull 只作渲染端视口的坐标系原点与换算基准；所有边界判定（漫游落点/抛掷反弹/角落定位/菜单夹取）
+ * 必须走 areas 的并集——显示器摆放不规则时 hull 里会有大片不属于任何屏的空洞，以它为边界会把
+ * 宠物放进看不见的地方。
  */
 function deskGeometry() {
   return buildDeskGeometry(screen.getAllDisplays(), screen.getPrimaryDisplay().id, process.platform);
@@ -501,8 +404,7 @@ function createPetWindows() {
       icon: path.join(__dirname, '..', '..', 'assets', 'logo.png'),
       resizable: false,
       hasShadow: false,
-      // 可聚焦：对话输入框/菜单需要窗口焦点才能打字（focusable:false 会让输入框永远无法聚焦）。
-      // 显示时使用 showInactive()，不打断其它应用；用户主动点对话输入框时仍然允许获得焦点。
+      // 可聚焦：对话输入框/菜单需要窗口焦点才能打字；显示用 showInactive()，不打断其它应用。
       focusable: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
@@ -515,20 +417,18 @@ function createPetWindows() {
     });
     win.setAlwaysOnTop(true, topmostLevel(process.platform));
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    // 窗口被其他窗口（另一只宠物）完全遮挡时，Chromium 默认会暂停本窗口渲染，
-    // 导致大宠物移动盖过小宠物时小宠物显示为"消失"。关闭后台节流，让被遮挡
-    // 窗口持续渲染，移开遮挡后立刻恢复显示。
+    // 窗口被另一只宠物完全遮挡时 Chromium 默认会暂停本窗口渲染，表现成小宠物「消失」；
+    // 关掉后台节流让被遮挡窗口持续渲染，移开遮挡后立刻可见。
     win.webContents.setBackgroundThrottling(false);
-    // 屏蔽 Electron 默认右键菜单：右键菜单由渲染端统一自绘组件弹出（两端一致），绝无双菜单
+    // 屏蔽 Electron 默认右键菜单：右键菜单由渲染端统一自绘，绝无双菜单
     win.webContents.on('context-menu', (event) => event.preventDefault());
-    // 页面级缩放 = petScale()（渲染端 CONFIG.scale 的同一来源）：整窗内容统一放大，渲染端坐标系
-    // 回到 CSS 像素——右键菜单/积分弹窗/聊天框等固定 px UI 随之恢复 DIP 观感，不再逐处补偿
-    // （见 DESIGN.md §3.5；跨进程交换仍走物理像素，由渲染端 toScreen/toLocal 收口）。
+    // 页面级缩放 = petScale()（渲染端 CONFIG.scale 的同一来源）：整窗内容统一放大，固定 px 的
+    // 菜单/弹窗随之恢复 DIP 观感；跨进程交换仍走物理像素，由渲染端 toScreen/toLocal 收口。
     // webPreferences.zoomFactor 对 show:false 的窗口不生效（实测），须在加载完成后设置。
     win.webContents.on('did-finish-load', () => {
       win.webContents.setZoomFactor(scale);
     });
-    // 默认整窗点击穿透（renderer 在光标进/出身体命中区时经 IPC 翻转可交互）；
+    // 默认整窗点击穿透（渲染端在光标进出身体命中区时经 IPC 翻转）；
     // forward:true 保证穿透期间 mousemove 仍转发进渲染端做命中判定。
     setWindowIgnore(win, true);
     // 任务栏按钮可能在 show / ready-to-show / 唤醒 / 显示器变化后重建（见 keepOffTaskbar）
@@ -537,22 +437,18 @@ function createPetWindows() {
       keepOffTaskbar(win);
       win.showInactive();
     });
-    // [#55 兜底显示] paintWhenInitiallyHidden:false 时渲染器可能不产出首帧，ready-to-show 便永不触发
-    // （Electron 文档原文：ready-to-show "will never fire if you use paintWhenInitiallyHidden: false"），
-    // 而 show() 只挂在它上面 → 窗口永远隐藏（进程活着、宠物逻辑照跑，桌面上什么都没有）。
-    // 页面加载完成后强制兜底一次；zoomFactor 的设置在更早注册的 did-finish-load 里，顺序不受影响。
+    // 兜底显示：paintWhenInitiallyHidden:false 时渲染器可能不产出首帧，ready-to-show 便永不触发，
+    // 而 show 只挂在它上面 → 窗口永远隐藏。页面加载完成后强制兜底一次；zoomFactor 在更早注册的
+    // did-finish-load 里设置，顺序不受影响。
     win.webContents.once('did-finish-load', () => {
       setTimeout(() => {
         if (!win.isDestroyed() && !win.isVisible()) win.showInactive();
       }, 400);
     });
-    // [#55 兜底交互] 上面的翻转链路只有「Electron forward 鼠标钩子 → 渲染端命中判定」一个入口，
-    // 该钩子在 Windows 上可能静默失效（回调超时被系统摘掉 / 被别的软件钩子干扰）→ 光标悬浮无反应、
-    // 拖不动、点击与右键全废。这里由主进程按**真实光标位置**独立判定，不依赖那条转发链路：
-    // 与 renderer 那条通道并存且判定区域一致（状态未变不翻转），转发正常的环境行为完全不变。
-    //
-    // 唯一不可自行决定的事：**渲染端正拿着鼠标输入时不得翻回穿透**（见 inputBusy）。
-    // 本进程无从判断这件事——光看光标位置与窗口位移分不清"拖拽跟手"和"漫游/抛掷"，所以由渲染端上报。
+    // 兜底交互：正规翻转链路只有 forward 鼠标钩子一个入口，该钩子在 Windows 上可能静默失效，
+    // 失效后悬浮、拖拽、点击与右键全废。这里按真实光标位置独立判定，与渲染端通道并存、
+    // 判定区域一致（状态未变不翻转）。唯一不能自行决定的是 busy：渲染端正拿着输入时不得翻回穿透
+    // （主进程光看光标与窗口位移分不清拖拽跟手和漫游/抛掷，所以由渲染端上报）。
     const pointerTimer = setInterval(() => {
       if (pointerFallbackPaused || win.isDestroyed()) return;
       const b = win.getBounds();
@@ -568,15 +464,10 @@ function createPetWindows() {
       const next = decideWindowIgnore(b, point, ignoring, busy, nextMs, inputRegions.get(win.id), mg);
       if (next !== ignoring) setWindowIgnore(win, next);
     }, POINTER_POLL_MS);
-    // [置顶看门狗] 建窗时那次 setAlwaysOnTop 之后再没人复查过：外部任何一次 z 序扰动都能让桌宠
-    // 沉到普通窗下面——而 `WS_EX_TOPMOST` 位还在（点击穿透的读-改-写会把它写回来），于是
-    // "是不是置顶"永远查得出 true、宠物却再也看不见，用户侧只能重启 helper 才回来。
-    // 这里低频重钉一次：落地就是 SetWindowPos(HWND_TOPMOST, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)，
-    // 不移动、不重绘、不抢焦点（判定的纯逻辑与全部依据见 topmost-watchdog.js）。
-    //
-    // 【注意】总开关 `TOPMOST_WATCHDOG_ENABLED` 当前是 **关闭** 的：重钉会把桌宠抬到所有置顶窗口
-    // 之上，打断全屏游戏与截图。关闭的理由、代价、以及一个尚未解决的「显示桌面后误置顶」bug，
-    // 都写在 topmost-watchdog.js 的文件头里 —— 要重新启用前请先读完那几节。
+    // 置顶看门狗：建窗时那次 setAlwaysOnTop 之后再没复查，外部一次 z 序扰动就能让宠物沉底，而
+    // WS_EX_TOPMOST 位还在（点击穿透的读-改-写会把它写回来），查位永远得 true。这里低频重钉一次，
+    // 落地不移动、不重绘、不抢焦点（依据与代价见 topmost-watchdog.js）。
+    // 总开关当前关闭：重钉会把宠物抬到所有置顶窗口之上，打断全屏游戏与截图。
     let lastTopmostAssertMs = Date.now();
     const topmostTimer = setInterval(() => {
       const nowMs = Date.now();
@@ -606,8 +497,8 @@ function createPetWindows() {
       offBodyMs.delete(win.id);
     });
     win
-      // 绝对路径：本文件现在有两条运行方式（被宿主 spawn / 被 lib/app.js 同进程 require），
-      // 相对路径会按 Electron 的 app 路径解析——同进程时那是 lib/，必然 ERR_FILE_NOT_FOUND。
+      // 绝对路径：本文件有两条运行方式（宿主 spawn / 同进程 require），相对路径会按 Electron 的
+      // app 路径解析，同进程时那是 lib/，必然 ERR_FILE_NOT_FOUND。
       .loadFile(path.join(__dirname, 'index.html'), {
         query: {
           configUrl,
@@ -620,8 +511,8 @@ function createPetWindows() {
           workAreaH: String(area.height),
           workAreaX: String(area.x),
           workAreaY: String(area.y),
-          // 逐屏工作区（屏幕坐标）+ 主屏下标：渲染端所有边界判定走它们的并集，不走外接矩形。
-          // 首帧就要用（position() 定角落），所以走 query；运行期变化再经 pet:displays 推送。
+          // 逐屏工作区（屏幕坐标）+ 主屏下标：边界判定走它们的并集。首帧就要用，所以走 query；
+          // 运行期变化再经 pet:displays 推送。
           areas: JSON.stringify(geo.areas),
           workAreas: JSON.stringify(geo.workAreas),
           topInsetRatio: String(geo.topInsetRatio),
@@ -638,13 +529,10 @@ function createPetWindows() {
   }
 }
 
-// ---------- bridge 协议（渲染端 custom scheme → 本进程 → 宿主 stdout JSON 行 + 本地回调） ----------
-// 渲染端的每个 fetch 都落到 dsh-pet-bridge://，protocol.handle 把请求以一行 JSON 写 stdout 转发宿主。
-// 宿主应答**不走近 0 号管道**：Electron 主进程在 Windows 上收不到 piped stdin（electron#4218），
-// 所以本进程开一个 127.0.0.1 随机端口 HTTP 回调（DSH 闸门只拦 DSH WebServer 路由，管不到这里）；
-// 请求行携带回调 URL，宿主处理完 POST 应答回来，按 id 唤醒等待中的请求。
-// 素材（webm/字体/光标）：宿主只回文件绝对路径，本进程自行读盘应答（二进制不过管道）。
-// 协议行统一前缀 BRIDGE_PREFIX，宿主侧按前缀区分协议与日志（console 输出也走 stdout）。
+// bridge 协议：渲染端的每个 fetch 落到 dsh-pet-bridge://，protocol.handle 把请求以一行 JSON 写
+// stdout 转发宿主。宿主应答不走近 0 号管道（Electron 主进程在 Windows 上收不到 piped stdin），
+// 所以本进程开一个 127.0.0.1 随机端口 HTTP 回调，按 id 唤醒等待中的请求；素材只回绝对路径，
+// 由本进程自行读盘应答（二进制不过管道）。协议行统一前缀 BRIDGE_PREFIX，宿主据此区分协议与日志。
 
 let bridgeSeq = 0;
 /** id -> {resolve, reject}：一个请求对应宿主的一次回调应答 */
@@ -736,16 +624,12 @@ async function handleBridgeRequest(request) {
   return new Response(resp.body ?? '', { status: resp.status || 200, headers });
 }
 
-// ---------- 系统托盘：桌面端显示开关 ----------
-// 为什么托盘放在本进程：它是桌面模式唯一「不进浏览器」的入口。某只宠物的 display 被改成
-// web/none 之后，它在桌面上就没有窗口了，**它自己的右键菜单也跟着消失**；托盘是此时唯一还能
-// 在桌面侧把它切回桌面的地方（宿主的设置页要开浏览器，网页端宠物的右键菜单也得先开浏览器）。
-// 但它不是非有不可：main 条目的 `trayEnabled` 为 false 时不建托盘（默认 true，见下 startTray）。
-// 这种情况下宿主也不会为它常驻——判据是 desktopModeEverActive && trayEnabled（src/host/index.ts）：
-// 托盘关掉后已经没有需要保住的东西，让本进程活着只是白烧一个空进程。
-// 数据不新增任何通道：读配置与写回都走渲染端在用的同一条 bridge（手动 start-desktop 流退回 HTTP）。
-// 菜单是静态的，但每次切换 display 都会让宿主重启本进程（syncDesktop），新进程按新配置重建菜单，
-// 所以这里不需要任何「重建菜单刷新勾选」的逻辑。
+// 系统托盘：桌面端的显示开关。
+// 托盘放在本进程，是因为它是桌面模式唯一不进浏览器的入口：某只宠物的 display 改成 web/none 后
+// 桌面窗口与它自己的右键菜单一起消失，只有托盘还能在桌面侧把它切回来。
+// 它不是非有不可：main 条目的 trayEnabled 为 false 时不建托盘，宿主也就不再为本进程常驻。
+// 数据不新增通道：读写都走渲染端在用的同一条 bridge。菜单是静态的——每次切换 display 宿主都会重启
+// 本进程（syncDesktop），新进程按新配置重建菜单，所以不需要「重建菜单刷新勾选」的逻辑。
 
 const PET_ROUTE = '/dsh-pet-7340';
 const ORIGIN = new URL(process.env.DSH_PET_CONFIG_URL || 'http://127.0.0.1:3080/dsh-pet-7340/config').origin;
@@ -795,8 +679,8 @@ function trayIcon() {
 }
 
 /**
- * 建托盘：列出**配置里全部**宠物（含 display 为 web/none 的——它们当前不在桌面上、勾是空的，
- * 点一下就能送回来，这是托盘相对宠物右键菜单的增量）。勾 = 当前 display 含 desktop/both。
+ * 建托盘：列出配置里全部宠物（含 display 为 web/none 的——它们当前勾是空的，点一下就能送回来，
+ * 这是托盘相对宠物右键菜单的增量）。勾 = 当前 display 含 desktop/both。
  */
 async function startTray() {
   try {
@@ -806,15 +690,11 @@ async function startTray() {
     }
     const resp = await hostRequest('GET', PET_ROUTE + '/config');
     const merged = JSON.parse(resp.body || '{}');
-    // 托盘开关（main 条目的 trayEnabled）：只有**显式 false** 才不建——缺失或写坏时保持建，
-    // 免得一份老配置/一个错值让托盘无声消失（非法值的告警由宿主读取侧统一报）。
-    // 与下面的 pets 取自同一份成品配置，不新增任何通道。
+    // 托盘开关（main 条目的 trayEnabled）：只有显式 false 才不建，缺失或写坏时保持建，
+    // 免得一份老配置或一个错值让托盘无声消失。与下面的 pets 取自同一份成品配置。
     if (merged && merged.main && merged.main.trayEnabled === false) return;
-    // 成品聚合的形状是 { <条目>: <整份配置文档> }——**顶层键不是宠物**，宠物在各条目的
-    // `pets` 数组里。与渲染端同一契约（renderer.js 的 loadConfig → S.flattenConfigPets，
-    // 规则源码见 src/shared/config.ts:26）。托盘只要 id/name/display，故不吹条目级字段。
-    // 踩过的坑：把条目本身当宠物读 → name/display 恒为 undefined → 标题回落成 id（菜单只剩
-    // 一个条目）、勾选恒为未选中、点击恒提交 desktop（现象就是「显示与不显示没区别」）。
+    // 成品聚合的形状是 { <条目>: <整份配置文档> }：顶层键不是宠物，宠物在各条目的 pets 数组里
+    // （与渲染端同一契约）。托盘只要 id/name/display，所以不吹条目级字段。
     const pets = Object.values(merged)
       .flatMap((conf) => (conf && Array.isArray(conf.pets) ? conf.pets : []))
       .map((pet) => ({
@@ -824,12 +704,9 @@ async function startTray() {
       }))
       .filter((pet) => pet.id);
     if (!pets.length) return; // 配置里没有任何宠物：没有可切换的对象，不建托盘
-    // 托盘「退出」是否可用（issue #178）：三种来源各自成立——
-    //   · 独立应用（APP_MODE）：本进程就是全部，app.quit() 即退出；
-    //   · 手动 start-desktop.mjs（!BRIDGE）：node 父进程只等本进程退出，app.quit() 后进程树干净收场；
-    //   · BRIDGE：宿主拉起的 Helper，**不能自己 app.quit()**——那会被当成崩溃按退避重启（点了只是闪一下），
-    //     必须问宿主愿不愿意退（GET /quit 的 canQuit）。DSH 宿主不提供该能力，菜单项因此不出现。
-    // 探测失败（旧宿主没有 /quit、返回素材兜底等）一律按"不支持"处理，行为与改动前一致。
+    // 托盘「退出」是否可用：独立应用与手动 start-desktop 流都可以自己 app.quit()；
+    // BRIDGE 下本进程由宿主拉起，自己退会被当成崩溃按退避重启，必须先问宿主（GET /quit 的 canQuit）。
+    // 探测失败一律按不支持处理，菜单项因此不出现。
     let hostCanQuit = false;
     if (BRIDGE && !APP_MODE) {
       try {
@@ -902,8 +779,7 @@ app.whenReady().then(() => {
     startBridgeCallback(); // 宿主应答回调服务器（stdin 在 Electron 主进程不可用，改走本地 HTTP）
   }
 
-  // macOS：桌面宠物不该占 Dock——Dock 里多一个图标只会碍事。**不跟 trayEnabled 联动**：
-  // 宠物本体的右键菜单在，桌面侧仍能操作（只有「宠物全不在桌面」时才真正没有入口，那是另一件事）。
+  // macOS：桌面宠物不该占 Dock。不跟 trayEnabled 联动——宠物本体的右键菜单仍在，桌面侧还能操作。
   if (TRAY_PLATFORM.hideDock && app.dock) app.dock.hide();
 
   // 托盘：不 await（建窗与建托盘互不依赖），内部自己等 bridge 回调服务就绪
@@ -912,8 +788,8 @@ app.whenReady().then(() => {
   linuxPointer?.start();
   createPetWindows();
 
-  // 合盖/唤醒是任务栏按钮重建最集中的时刻（#193 后续）：resume / unlock-screen 后把每只宠物
-  // 重新摘一次。powerMonitor 只能在 ready 之后使用，所以挂在这里而不是模块顶层。
+  // 合盖/唤醒是任务栏按钮重建最集中的时刻：resume / unlock-screen 后把每只宠物重新摘一次。
+  // powerMonitor 只能在 ready 之后使用，所以挂在这里而不是模块顶层。
   const reassertTaskbar = () => {
     for (const win of windows.values()) keepOffTaskbar(win);
   };
@@ -929,21 +805,20 @@ app.whenReady().then(() => {
     const width = Number(bounds?.width);
     const height = Number(bounds?.height);
     if (![x, y, width, height].every(Number.isFinite)) return;
-    // 去重必须比较**我们上一次请求的值**，绝不能拿 win.getContentBounds() 回读值来比：
-    // 跨缩放屏的 DIP↔物理 往返有 ScaleToEnclosingRect（向外取整）与 origin 舍入，
-    // 读回值与设定值永远不相等，去重永远不生效，反而变成每帧强制重设窗口位置。
+    // 去重必须比较我们上一次请求的值，绝不能拿 win.getContentBounds() 的回读值来比：
+    // 跨缩放屏的 DIP↔物理往返有向外取整与原点舍入，读回值永远不等于设定值，去重就永远不生效。
     const rect = { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
     const key = rect.x + ',' + rect.y + ',' + rect.width + ',' + rect.height;
     if (lastRequestedBounds.get(win.id) !== key) {
       lastRequestedBounds.set(win.id, key);
       win.setContentBounds(rect, false);
     }
-    // 窗口余量（左右/上）：命中区判定的依据，余量四边不再相等（上边距按气泡最大高度加高）
+    // 窗口余量（左右/上）：命中区判定的依据，余量四边不再相等。
     const ml = Number(bounds?.marginL);
     const mt = Number(bounds?.marginT);
     if (Number.isFinite(ml) && Number.isFinite(mt)) winMargins.set(win.id, { l: ml, t: mt });
-    // 碰撞站场：位置必须用**包围盒左上角**（renderer 显式上报 boxX/boxY）——
-    // 窗口坐标 = 包围盒 − margin（半只宠物宽），直接拿窗口坐标会让跨窗检测整体错位
+    // 碰撞站场的位置必须用包围盒左上角（渲染端显式上报 boxX/boxY）：窗口坐标 = 包围盒 − margin，
+    // 直接拿窗口坐标会让跨窗检测整体错位。
     const petId = [...windows.keys()].find((id) => windows.get(id) === win);
     if (petId) {
       const bx = Number(bounds?.boxX);
@@ -952,9 +827,8 @@ app.whenReady().then(() => {
       const bottomPad = Number(bounds?.bottomPad);
       const vx = Number(bounds?.vx);
       const vy = Number(bounds?.vy);
-      // 位置 + 尺寸 + 速度一并登记：set-bounds 是每次位置变化都会触发的全量上报
-      // （此前只更新 x/y，静止宠物 size 永远为 0，跨窗碰撞检测 `!o.size` 直接跳过它）；
-      // 速度取渲染端上报值（飞行中实时、静止/拖拽 = 0），落地后不再残留旧飞行速度。
+      // 位置 + 尺寸 + 速度一并登记：set-bounds 每次位置变化都会触发，带上尺寸静止宠物才能被
+      // 跨窗碰撞检测看见；速度取渲染端上报值（飞行中实时、静止/拖拽 = 0），落地后不残留旧速度。
       updatePetState(petId, {
         x: Number.isFinite(bx) ? bx : x,
         y: Number.isFinite(by) ? by : y,
@@ -995,8 +869,8 @@ app.whenReady().then(() => {
     }
   });
 
-  // 点击穿透翻转：renderer 在光标进/出身体命中区时上报；穿透期间仍保留 forward（mousemove 继续转发）。
-  // 兜底轮询（见 createPetWindows）也走同一个出口 setWindowIgnore，两条通道共享同一份镜像状态。
+  // 点击穿透翻转：渲染端在光标进出身体命中区时上报；穿透期间仍保留 forward。
+  // 兜底轮询也走同一个出口 setWindowIgnore，两条通道共享同一份镜像状态。
   ipcMain.on('pet:set-interactive', (event, interactive) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win.isDestroyed()) return;
@@ -1018,8 +892,7 @@ app.whenReady().then(() => {
   });
 
   // 拖拽持有完整输入租约；菜单/对话则由 inputRegions 把交互限制在实际控件矩形内。
-  // 只存标记、不直接翻转窗口——**唯一出口**仍是 setWindowIgnore（在兜底轮询里按完整规则判定），
-  // 否则会出现"两条通道抢着翻同一个窗口"的竞态。
+  // 这里只存标记、不直接翻窗口——唯一出口仍是 setWindowIgnore，否则两条通道会抢着翻同一个窗口。
   ipcMain.on('pet:input-busy', (event, busy) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win || win.isDestroyed()) return;
@@ -1035,14 +908,12 @@ app.whenReady().then(() => {
     inputRegions.set(win.id, { dragging: input.dragging === true, rects });
   });
 
-  // 右键菜单「打开网站」：交给**系统默认浏览器**打开（等效于网页里 Ctrl+点击链接新标签页），
-  // 不建专属窗口——宠物窗口机制是透明小窗，不该承载常规网页浏览。URL 由渲染端从
-  // configUrl 推导 = DSH webServer 端口，端口变化自动跟随
+  // 右键菜单「打开网站」：交给系统默认浏览器（等效网页里 Ctrl+点击链接），不建专属窗口——
+  // 宠物窗口是透明小窗，不该承载常规网页浏览。URL 由渲染端从 configUrl 推导。
   const openSite = (url) => {
-    // 宿主注入的已鉴权站点 URL（含本进程启动令牌）：DSH 只在 `GET /` 接受它并换发绑定 authority 的
-    // 浏览器 Cookie，裸 origin 在默认浏览器里必然 401（#87）。令牌等价登录态，所以**只在与目标同
-    // origin 时**才启用——绝不让它被带去别的站点；取不到该变量（旧宿主 / standalone / 手写
-    // start-desktop）时，行为与以前完全一致。
+    // 宿主注入的已鉴权站点 URL（含本进程启动令牌）：DSH 只在 GET / 接受它并换发浏览器 Cookie，
+    // 裸 origin 在默认浏览器里必然 401。令牌等价登录态，只在与目标同 origin 时启用，
+    // 绝不让它被带去别的站点；取不到该变量时行为与以前一致。
     let target = url;
     const authed = process.env.DSH_PET_SITE_URL || '';
     if (/^https?:[/][/]/.test(authed)) {
@@ -1057,12 +928,9 @@ app.whenReady().then(() => {
     });
   };
 
-  // 去向由宿主形态决定（OPEN_TARGET，宿主按自身形态注入）：
-  //   desktop（宿主 = DSH 桌面应用）→ 用应用自注册的 dsh:// 协议把主窗口叫回前台：已运行则第二个实例
-  //     被单实例锁拦下、宿主收到 second-instance 后 focusPrimaryWindow()；未运行则协议直接把应用拉起来。
-  //     比 spawn 宿主 exe 干净——不必处理 ELECTRON_RUN_AS_NODE（spawn 继承它就成了 node 模式，起不了界面）
-  //     与安装路径探测。
-  //   site（dsh web / 独立模式）→ 原行为：系统默认浏览器打开站点。
+  // 去向由宿主形态决定：desktop 用应用自注册的 dsh:// 协议把主窗口叫回前台（已运行则被单实例锁
+  // 拦下、宿主收到 second-instance 后聚焦；未运行则协议直接把应用拉起来），比 spawn 宿主 exe 干净；
+  // site 则是原行为：系统默认浏览器打开站点。
   ipcMain.on('pet:open-site', (event, payload) => {
     const url = payload && typeof payload === 'object' ? String(payload.url || '') : '';
     if (!/^https?:[/][/]/.test(url)) return;
@@ -1077,22 +945,21 @@ app.whenReady().then(() => {
     openSite(url);
   });
 
-  // 显示器热更新：分辨率/缩放变化、插拔屏、旋转都会让桌面几何失效。原先几何只在
-  // createPetWindows() 算一次并经 URL query 注入，渲染端 VIEW 是模块顶层常量，运行期永不更新——
-  // 表现为「改了分辨率后可移动范围还是旧的」。这里重算并推给所有窗口，渲染端就地重挂。
+  // 显示器热更新：分辨率/缩放变化、插拔屏、旋转都会让桌面几何失效（原先只在建窗时经 query 注入
+  // 一次，运行期永不更新）。这里重算并推给所有窗口，渲染端就地重挂。
   let displaysTimer = null;
   const pushDisplays = () => {
     const geo = deskGeometry();
     lastRequestedBounds.clear(); // 坐标系变了，去重缓存作废，下一帧必须真的重设一次
     for (const win of windows.values()) {
       if (win.isDestroyed()) continue;
-      // 显示器拓扑变化同样是任务栏按钮重建的时机（#193 后续）
+      // 显示器拓扑变化同样是任务栏按钮重建的时机
       keepOffTaskbar(win);
       win.webContents.send('pet:displays', geo);
     }
     console.error('[dsh-pet-desktop-helper] displays changed: ' + JSON.stringify(geo));
-    // 主屏缩放可能一起变了（它决定宠物的尺寸补偿）。线性化生效期间 screen API 只报被强制的值，
-    // 真实值只能靠探测子进程拿；不一致就刷新缓存，下次启动自动用上。
+    // 主屏缩放可能一起变了：线性化生效期间 screen API 只报被强制的值，真实值只能靠探测子进程拿；
+    // 不一致就刷新缓存，下次启动自动用上。
     if (FORCED_SCALE > 0) {
       setTimeout(() => {
         const real = probePrimaryScale();
@@ -1120,8 +987,8 @@ app.whenReady().then(() => {
   screen.on('display-added', scheduleDisplays);
   screen.on('display-removed', scheduleDisplays);
 
-  // 冒烟自检模式（默认关闭）：DSH_PET_SMOKE=1 时延时截图到 DSH_PET_SMOKE_OUT 后退出，
-  // 用于验证窗口/渲染/动画链路（如 CI 或本地验证）。
+  // 冒烟自检（默认关闭）：DSH_PET_SMOKE=1 时延时截图到 DSH_PET_SMOKE_OUT 后退出，
+  // 用于验证窗口/渲染/动画链路。
   if (process.env.DSH_PET_SMOKE === '1') {
     const smokeOut = process.env.DSH_PET_SMOKE_OUT || path.join(app.getPath('temp'), 'dsh-pet-smoke.png');
     const afterMs = Number(process.env.DSH_PET_SMOKE_AFTER_MS || 9000);
@@ -1314,9 +1181,8 @@ app.whenReady().then(() => {
               JSON.stringify(dump),
           );
           console.log('[dsh-pet-desktop-helper] smoke bounds:', JSON.stringify(first.getContentBounds()));
-          // 点击穿透 round-trip：setInteractive(true)→窗口捕获输入（忽略鼠标=false）；
-          // setInteractive(false)→恢复整窗穿透（忽略鼠标=true）。状态取自主进程镜像 windowIgnore。
-          // 期间暂停兜底轮询：它按真实光标位置翻转，冒烟时鼠标不在宠物身上会覆盖本断言的状态。
+          // 点击穿透 round-trip：true → 窗口捕获输入，false → 恢复整窗穿透；状态取自主进程镜像。
+          // 期间暂停兜底轮询：它按真实光标翻转，冒烟时鼠标不在宠物身上会覆盖本断言的状态。
           pointerFallbackPaused = true;
           await first.webContents.executeJavaScript('window.petBridge.setInteractive(true); true;');
           await new Promise((r) => setTimeout(r, 80));
@@ -1342,8 +1208,7 @@ app.whenReady().then(() => {
 });
 
 // 退出时销毁托盘图标：不销毁会在 Windows 通知区留下「幽灵图标」（鼠标划过才消失）。
-// 注意宿主改 display 时是 SIGTERM/SIGKILL 硬杀（helper-process.ts），Windows 上那是
-// TerminateProcess、拦不到，所以这条只覆盖优雅退出（窗口全关、宿主存活探测判定退出等）。
+// 宿主改 display 时是 SIGTERM/SIGKILL 硬杀，Windows 上拦不到，所以这条只覆盖优雅退出。
 app.on('before-quit', () => {
   if (!tray) return;
   try {
@@ -1355,7 +1220,7 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  // 托盘常驻：桌面上没有宠物也要留着（否则「全关掉」就再也切不回来，见 index.ts 的 desktopModeEverActive）
+  // 托盘常驻：桌面上没有宠物也要留着，否则「全关掉」就再也切不回来
   if (tray) return;
   app.quit();
 });

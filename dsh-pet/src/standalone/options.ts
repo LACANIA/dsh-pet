@@ -1,24 +1,24 @@
 /**
- * 独立模式的命令行解析与路径推导（纯逻辑，零 I/O —— 便于 node:test 直接单测）。
+ * 独立模式的命令行解析与路径推导，纯逻辑、零 I/O。
  *
- * 配置路径为什么在这里再写一遍：独立模式的 `--check` 要回答"DSH 会读哪份配置"，
- * 而那必须在不 `apply`（= 不拉起桌宠窗口）的前提下算出来。`src/host/index.ts` 仍是
- * 唯一事实来源，这里是它的**只读镜像**；`options.test.ts` 用插件自己的
- * `GET /config/meta`（由 `apply` 注册的真实路由）钉住两者一致，镜像一旦漂移测试就红。
+ * 负责把 argv 变成选项，并镜像宿主半侧推导出的配置路径；不读文件、不建目录。
+ * 路径口径以宿主半侧为准，这里只是只读镜像，测试会钉住两者一致。
+ * 必须始终成立：--check 不 apply 也能算出 DSH 会读的配置路径。
+ * @module dsh-pet/src/standalone/options
  */
 import { join } from 'node:path';
 
 import type { ConfigPaths } from '../host/config';
 import { DEFAULT_STANDALONE_PORT } from './server';
 
-/** 命令行解析结果 */
+/** 解析后的命令行选项。 */
 export interface CliOptions {
   port: number;
   check: boolean;
   help: boolean;
 }
 
-/** `--help` 正文 */
+/** --help 正文。 */
 export const USAGE = `dsh-pet 独立模式（不需要 DSH）
 
 用法：dsh-pet-standalone [选项]
@@ -36,8 +36,8 @@ export const USAGE = `dsh-pet 独立模式（不需要 DSH）
 
 /**
  * 解析 argv。
- * @param argv `process.argv.slice(2)`
- * @returns 选项，或 `{ error }`（调用方打印用法并以 2 退出）
+ * @param argv - 已去掉 node 与脚本路径的参数。
+ * @returns 选项，或带 error 的失败结果，由调用方打印用法并以 2 退出。
  */
 export function parseArgs(argv: string[]): { options: CliOptions } | { error: string } {
   const options: CliOptions = { port: DEFAULT_STANDALONE_PORT, check: false, help: false };
@@ -63,9 +63,10 @@ export function parseArgs(argv: string[]): { options: CliOptions } | { error: st
 }
 
 /**
- * 配置路径集（`src/host/index.ts` 那份推导的只读镜像，见文件头）。
- * @param root 插件包根目录（构建产物里 = 包根；源码形态下 = `src/`）
- * @param home DSH_HOME
+ * 推导配置路径集（宿主半侧那份推导的只读镜像）。
+ * @param root - 插件包根目录。
+ * @param home - DSH_HOME。
+ * @returns 与宿主半侧一致的路径集。
  */
 export function configPathsFor(root: string, home: string): ConfigPaths {
   const userRoot = join(home, 'dsh-pet');
@@ -77,7 +78,7 @@ export function configPathsFor(root: string, home: string): ConfigPaths {
   };
 }
 
-/** 宠物列表的展示串：`display` 原样打印，由用户确认（独立模式不替用户改配置） */
+/** 宠物列表的展示串：display 原样打印，供用户确认。 */
 export function describePets(pets: Record<string, unknown>[]): string {
   if (pets.length === 0) return '（没有宠物：配置里 pets 为空）';
   return pets
@@ -86,11 +87,9 @@ export function describePets(pets: Record<string, unknown>[]): string {
 }
 
 /**
- * 该实例是否会出现在桌面（`display` 含 desktop/both）。
- *
- * 口径来源是 `src/host/index.ts` 的 `isDesktopVisible`（那里是模块内 const、未导出），
- * 独立模式只是为了**打印提示**才知道这条规则，不参与渲染决策（渲染由插件自己判断），
- * 因此这里保留一份最小镜像；规则若变，测试与提示文案会露出来。
+ * 判断实例是否会出现在桌面（display 含 desktop 或 both），只用于提示。
+ * @param pet - 宠物条目。
+ * @returns 是否会出现在桌面。
  */
 export function isDesktopVisible(pet: Record<string, unknown>): boolean {
   const display = pet.display;

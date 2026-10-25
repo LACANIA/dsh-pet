@@ -1,10 +1,9 @@
 /**
  * 路由级回归测试：`/dsh-pet-7340/thumb/<petId>/<file>` 的路径安全与素材归属。
  *
- * 为什么单独有这一层：`petId` 是该路由里唯一**直接进文件路径**的用户输入，而 2026-08-28 的 pet pack
- * 重构把它引入时没套用 resolveAsset——Windows 上 `%5C` 解出的反斜杠不会被 `rest.split('/')` 切开，
- * 于是 `..\..\` 能越出用户根读盘；它挂了 2.5 周才被外部贡献者发现（PR #53）。本文件把这条不变式钉在
- * **handler 这一层**（而不是只测纯函数），防的就是"以后又有人新写一段手拼路径"。
+ * 为什么单独有这一层：`petId` 是该路由里唯一直接进文件路径的用户输入，必须套用 resolveAsset——
+ * Windows 上 `%5C` 解出的反斜杠不会被 `rest.split('/')` 切开，否则 `..\..\` 能越出用户根读盘。
+ * 本文件把这条不变式钉在 handler 这一层（而不是只测纯函数），防的就是"以后又有人新写一段手拼路径"。
  *
  * 直接 import 源码（`./index.ts`）而不是 `lib/` 构建产物：测试不依赖 `npm run build`（lib/ 不入库）。
  * 代价：源码形态下模块内的 PACKAGE_ROOT 解析为 `<pkg>/src`，包内 assets 不可达，故本文件只覆盖 thumb
@@ -94,7 +93,7 @@ before(() => {
   let handler: ((req: unknown, res: unknown) => Promise<void>) | undefined;
   const noop = (): void => {};
   apply({
-    // 与 DSH 一致：effect 的返回值是**释放函数**。这里收下来在 after() 里调用——
+    // 与 DSH 一致：effect 的返回值是释放函数。这里收下来在 after() 里调用——
     // 插件现在有常驻定时器（余额周期刷新），不释放的话测试进程会一直等它（跑完不退出）。
     effect: (fn: () => unknown) => {
       try {
@@ -286,10 +285,9 @@ describe('/state + /balance —— 轮询统一状态与余额动作端点', () 
 });
 
 describe('轮询统一后删掉的旧端点 —— 不得复活', () => {
-  // 这些端点改造前各有独立的客户端轮询循环；全部并入 GET /state 后删除。
+  // 这些端点已全部并入 GET /state，不再有独立的客户端轮询循环，旧端点不得复活。
   // 保留这条守卫是为了防止"顺手又加回一个 /xxx 轮询端点"（那正是这次要消灭的东西）。
-  // 注意 /broadcast 不在此列：它以**新的语义**回来了（POST 写入端点，见下方专门的分组），
-  // 这里的守卫只要求它不再是一个 GET 读端点。
+  // 注意 /broadcast 不在此列：它是 POST 写入端点（见下方专门的分组），这里的守卫只要求它不再是一个 GET 读端点。
   for (const path of ['/dsh-pet-7340/notify']) {
     test(`${path} 已删除（GET 不再是端点）`, async () => {
       const r = await call(path);
@@ -353,7 +351,7 @@ describe('/broadcast —— 第三方投喂（POST 写入端点，issue #76）',
 
   test('非法 duration → bad-request，且**在读配置之前**就短路（不是 generate-error）', async () => {
     // 与本文件里"配置不可达"这一前提配合：若 duration 校验被放到读配置之后，
-    // 这几条会变成 generate-error——断言 reason 就同时钉住了**短路顺序**。
+    // 这几条会变成 generate-error——断言 reason 就同时钉住了短路顺序。
     for (const duration of [-1, -0.5, '3000', {}, [], true]) {
       const r = await call('/dsh-pet-7340/broadcast?pet=main', 'POST', JSON.stringify({ text: '该喝水了', duration }));
       assert.equal(r.status, 200, `duration=${JSON.stringify(duration)}`);
@@ -583,8 +581,8 @@ describe('pic/memes 路由 —— 素材根不得当路径片段（与 thumb 同
 });
 
 describe('pet 必填 —— 缺省一律 pet-required（issue #122 第 1 条：绝不退到列表第一只）', () => {
-  // 与 /broadcast 的 duration 同一处境：pet 空串**不必读配置**就能拒，所以这一组在"配置不可达"
-  // 的源码形态下照样能测——断言 reason 同时钉住了**短路顺序**（是 pet-required，不是 generate-error）。
+  // 与 /broadcast 的 duration 同一处境：pet 空串不必读配置就能拒，所以这一组在"配置不可达"
+  // 的源码形态下照样能测——断言 reason 同时钉住了短路顺序（是 pet-required，不是 generate-error）。
   // 决策层那 5 条（/anim、/broadcast、/bubble/clear、/position、/throw）的同一分支由各自的
   // *.test.ts 覆盖：它们的 pet 解析住在决策模块里，路由层拿不到"没读配置"的时机。
 
@@ -624,8 +622,8 @@ describe('pet 必填 —— 缺省一律 pet-required（issue #122 第 1 条：�
 });
 
 describe('surface 必填 —— 缺省/非法一律 bad-request，且短路在读盘之前（issue #122 第 1 条）', () => {
-  // 与 pet 空串同一处境：surface 的**参数级**校验放在读配置之前，所以这一组在"配置不可达"的
-  // 源码形态下照样能测——断言 reason 同时钉住了**短路顺序**（是 bad-request，不是 generate-error）。
+  // 与 pet 空串同一处境：surface 的参数级校验放在读配置之前，所以这一组在"配置不可达"的
+  // 源码形态下照样能测——断言 reason 同时钉住了短路顺序（是 bad-request，不是 generate-error）。
   test('/lock、/whisper、/chat POST：不给 surface / 非法值 → bad-request', async () => {
     const cases: Array<[string, string, string | undefined]> = [
       ['lock', 'POST', '{}'],
@@ -645,7 +643,7 @@ describe('surface 必填 —— 缺省/非法一律 bad-request，且短路在�
 
   test('/chat GET 与 /lock/release 不校验 surface：照旧走到读配置那一步（generate-error）', async () => {
     // 释放必须永远能成功（否则宠物中途被隐藏就撤不掉锁）；GET 是读记忆，与显示在哪一端无关。
-    // 两者都**忽略** surface——连非法值也不该报 bad-request。
+    // 两者都忽略 surface——连非法值也不该报 bad-request。
     const g = await call('/dsh-pet-7340/chat?pet=main&surface=nope');
     assert.equal(g.status, 200);
     assert.equal((JSON.parse(g.body) as { reason: string }).reason, 'generate-error');
@@ -657,7 +655,7 @@ describe('surface 必填 —— 缺省/非法一律 bad-request，且短路在�
 
 describe('/pose —— 桌面端实况（GET 查询 / POST 上报），与 surface 无关', () => {
   // 与 /whisper、/chat 的"pet 必填"同一处境：这些断言在"配置不可达"的源码形态下照样成立，
-  // 正好钉住**短路顺序**（pet 先报，surface 根本不参与）。
+  // 正好钉住短路顺序（pet 先报，surface 根本不参与）。
   test('/pose：不给 pet → pet-required；方法不对 → 405', async () => {
     const r = await call('/dsh-pet-7340/pose');
     assert.equal(r.status, 200);
@@ -671,7 +669,7 @@ describe('/pose —— 桌面端实况（GET 查询 / POST 上报），与 surfa
   });
 
   test('两条都**不校验** surface：连非法值也照旧走到读配置那一步', async () => {
-    // 它们是**读 / 内部**端点（同 GET /chat、GET /playback）——surface 只加在会产生渲染端可见效果
+    // 它们是读 / 内部端点（同 GET /chat、GET /playback）——surface 只加在会产生渲染端可见效果
     // 的动作端点上。这条同时钉住"以后别顺手把 surface 加进来"。
     const g = await call('/dsh-pet-7340/pose?pet=main&surface=nope');
     assert.equal(g.status, 200);

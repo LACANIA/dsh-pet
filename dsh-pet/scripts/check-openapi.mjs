@@ -1,10 +1,11 @@
-// OpenAPI 文档校验（随 prepack 门禁运行）：
-//   1. YAML 可解析
-//   2. 所有 $ref 都能解析到（悬空引用是文档类交付最常见的低级错误）
-//   3. 路径/操作/响应结构符合 OpenAPI 3.1 基本要求
-//   4. 文档里列出的每条路径都真实存在于 host 路由实现里（防止文档漂移）
-//
-// 路径一律从本文件位置解析（不依赖 CWD）：openapi.yaml 在仓库根，本文件在 dsh-pet/scripts/。
+/**
+ * OpenAPI 文档校验，随发布链的 prepack 门禁运行：YAML 可解析、所有 $ref 都能解析到、
+ * 路径/操作/响应符合 3.1 基本要求、文档里每条路径都真实存在于宿主半侧的路由实现里（防文档漂移）。
+ * 只做静态比对，不起服务、不发请求，也不校验示例内容的语义。
+ * 路径一律从本文件位置解析而非 CWD：文档在仓库根，本文件在 dsh-pet/scripts/。
+ * 必须始终：任何一项失败都以非零退出码结束，坏文档不能进发布链。
+ * @module dsh-pet/scripts/check-openapi
+ */
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
@@ -21,7 +22,6 @@ const doc = yaml.load(readFileSync(SPEC_PATH, 'utf8'));
 const fail = [];
 const ok = [];
 
-// ---- 1. 顶层结构 ----
 if (doc.openapi !== '3.1.0') fail.push(`openapi 版本应为 3.1.0，实际 ${doc.openapi}`);
 else ok.push('openapi 3.1.0');
 for (const key of ['info', 'paths', 'components', 'servers', 'tags']) {
@@ -29,7 +29,7 @@ for (const key of ['info', 'paths', 'components', 'servers', 'tags']) {
 }
 if (!doc.info?.title || !doc.info?.version) fail.push('info.title / info.version 缺失');
 
-// ---- 2. $ref 解析 ----
+/** 按 JSON Pointer 解析文档内引用（含 ~1/~0 反转义），解析不到返回 undefined。 */
 const deref = (ref) => {
   if (!ref.startsWith('#/')) return undefined;
   let cur = doc;
@@ -40,6 +40,7 @@ const deref = (ref) => {
   return cur;
 };
 let refCount = 0;
+/** 深度遍历文档，逐个校验 $ref 可解析并计数。 */
 const walk = (node, path) => {
   if (!node || typeof node !== 'object') return;
   if (Array.isArray(node)) return node.forEach((v, i) => walk(v, `${path}[${i}]`));
@@ -53,7 +54,6 @@ const walk = (node, path) => {
 walk(doc, '$');
 ok.push(`${refCount} 个 $ref 全部可解析`);
 
-// ---- 3. 操作与响应 ----
 const METHODS = ['get', 'put', 'post', 'delete', 'patch', 'head', 'options', 'trace'];
 let ops = 0;
 for (const [p, item] of Object.entries(doc.paths)) {
@@ -75,7 +75,7 @@ for (const [p, item] of Object.entries(doc.paths)) {
       if (!/^[1-5](\d\d|XX)$/.test(code)) fail.push(`${m.toUpperCase()} ${p} 响应码非法: ${code}`);
       if (!r.description && !r.$ref) fail.push(`${m.toUpperCase()} ${p} 响应 ${code} 缺少 description`);
     }
-    // 组件响应被 $ref 时不能带兄弟字段（3.1 里兄弟字段会被忽略）——顺带查一下参数引用
+    // 内联参数必须自带 name/in，否则路由无法绑定；$ref 参数交给上面的悬空引用检查。
     for (const prm of op.parameters ?? []) {
       if (prm.$ref === undefined && (!prm.name || !prm.in)) fail.push(`${m.toUpperCase()} ${p} 的参数缺少 name/in`);
     }
@@ -83,9 +83,8 @@ for (const [p, item] of Object.entries(doc.paths)) {
 }
 ok.push(`${Object.keys(doc.paths).length} 条路径 / ${ops} 个操作`);
 
-// ---- 4. 文档路径 vs 真实实现 ----
-// host 路由是 if (rest === 'x') 链 + scope 分支。rest 可能是两段（config/meta），
-// 所以两边都归一化成「一级段」（config/meta → config）再比对，否则会误报。
+// 宿主半侧的路由是 if (rest === 'x') 链加 scope 分支，rest 可能是两段（config/meta），
+// 所以两侧都归一化成一级段再比对，否则会互相误报。
 const host = readFileSync(HOST_SRC, 'utf8');
 const implemented = new Set([...host.matchAll(/rest === '([^']+)'/g)].map((m) => m[1].split('/')[0]));
 for (const s of ['font', 'pic', 'thumb']) implemented.add(s);
@@ -102,7 +101,7 @@ for (const seg of implemented) {
 }
 ok.push(`路由对齐：${[...documented].sort().join(', ')}`);
 
-// ---- 5. 组件 schema 里的 $ref 目标存在且是 schema ----
+// 组件 schema 要么自带类型组合、要么引用别处，否则消费者无法据此生成代码。
 for (const [name, s] of Object.entries(doc.components.schemas)) {
   if (!s || typeof s !== 'object') fail.push(`schema ${name} 不是对象`);
   if (!s.type && !s.oneOf && !s.allOf && !s.anyOf && !s.$ref) fail.push(`schema ${name} 没有 type/oneOf`);

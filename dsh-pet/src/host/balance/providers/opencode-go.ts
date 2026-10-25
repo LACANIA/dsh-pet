@@ -1,26 +1,26 @@
 /**
- * OpenCode Go（provider id `opencode-go`）—— 三窗口用量。
+ * OpenCode Go（provider id opencode-go）：三窗口用量。
  *
- * 接口：`GET https://opencode.ai/zen/go/v1/usage`（Bearer），响应 `{ usage: { rolling, weekly, monthly } }`。
- * 该接口保证三个窗口都在，故三窗与三个重置时间全是必填（缺一个就说明响应形态变了 → 报错，不静默）。
+ * 取 GET https://opencode.ai/zen/go/v1/usage；接口保证三窗口与三个重置时间齐全，缺一个即视为响应变形并报错。
+ * 满额度是接口不回传的业务常量，随数据带出；滚动窗为 5 小时。
+ * opencode-go 与 opencode 是两个 id，后者没有用量接口，不登记。
  *
- * 满额度是**本服务商的业务常量**（接口不回报），跟着数据带出去；滚动窗是 5 小时。
- *
- * 注意 `opencode-go` 与 `opencode` 是两个 id：Zen 按量版（`opencode`）没有用量接口，不登记。
+ * @module dsh-pet/src/host/balance/providers/opencode-go
  */
 import { fetchWithRetry, num, str } from '../internal';
 import type { BalanceProvider } from '../types';
 
-/** 各窗口满额度金额（USD）。业务常量：12 = 5h（5 小时滚动窗口）、30 = 周、60 = 月 */
+/** 各窗口满额度（USD）：滚动 12、周 30、月 60；接口不回传，属业务常量。 */
 const QUOTA_USD = {
   rolling: 12,
   weekly: 30,
   monthly: 60,
 } as const;
 
-/** 滚动窗时长（展示名）：本服务商是 5 小时 */
+/** 滚动窗的展示名：本服务商是 5 小时。 */
 const ROLLING_LABEL = '5h';
 
+/** OpenCode Go 的内置定义。 */
 export const opencodeGo: BalanceProvider = {
   id: 'opencode-go',
   credential: { mode: 'ref', ref: 'OPENCODE_GO_API_KEY' },

@@ -1,15 +1,9 @@
 /**
- * 桌宠配置管理设置页（settings.section 插槽，id: pet-config）
- *
- * - 多开：管理多个桌宠，每个宠物独立 id/name/size/位置（corner + marginX/Y）
- * - 数据流：设置页持有「main 条目宠物列表」→ 保存时全量 PUT /dsh-pet-7340/config
- *   （写用户层 main-config.jsonc = 可编辑层，文件宠物永不回写）
- * - 数据入口：配置由 host readAllConfig 合并为**成品**（GET /dsh-pet-7340/config），
- *   设置页只读 main 条目（可编辑）+ 统计文件宠物条数，不做任何校验
- * - 即时生效：保存/同步后用 host 返回的**成品聚合**调用 petBridge.reload，
- *   容器走同一份 flattenConfigPets 重新渲染，无需刷新页面（设置页不自己拼任何条目级字段）
- *
- * 样式对齐官方设置页：max-width 720px、全走 --dsw-alias-* 语义 token（主题跟随）。
+ * 「桌宠配置」设置页（`settings.section` 插槽，id 为 pet-config）：编辑 main 条目的宠物列表与全局默认值。
+ * 只读成品配置里可编辑的 main 条目并统计文件宠物条数，不自行拼条目级字段；文件宠物永不回写。
+ * 保存与同步都全量写用户层，再用宿主返回的成品聚合调 `petBridge.reload`，容器据此重渲染、无需刷新。
+ * 样式对齐官方设置页：max-width 720px，全部走 `--dsw-alias-*` 语义 token。
+ * @module dsh-pet/src/client/settings
  */
 import { PET_DISPLAYS } from '../shared/config';
 import { DEFAULT_FONT, FONT_PRESETS, FONT_SIZE_MAX, FONT_SIZE_MIN } from '../shared/fonts';
@@ -20,10 +14,8 @@ import type { ChangeEvent, Dispatch, FunctionComponent, SetStateAction } from 'r
 import type * as ReactNS from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
-/** 容器与设置页共享的桥（同一 bundle 单例）：
- * current=最新完整宠物列表（**成品拍平**，含条目级字段与文件宠物，默认空；容器是唯一写入方）；
- * reload=容器注册的重载回调（未注册时为无操作函数）：传 host 保存接口返回的成品聚合即直接拍平，
- *   缺省则由容器自行 GET /config；template=main 条目的宠物[0]（「添加宠物」用它作为默认配置） */
+/** 容器与设置页共享的桥（同一 bundle 单例）：current 是最新成品拍平列表（容器是唯一写入方），
+ * reload 是容器注册的重载回调（传成品聚合即直接拍平，缺省由容器自行拉取），template 是 main 条目的首只宠物。 */
 export const petBridge: {
   current: Pet[];
   reload: (merged?: Record<string, Record<string, unknown>>) => void;
@@ -34,14 +26,14 @@ export const petBridge: {
   template: undefined,
 };
 
-/** 字典命名空间 */
+/** 字典命名空间。 */
 export const NS = 'pet.config';
 
-/** 一处「服务商 + 模型」是否合法：**要么都留空（= 跟随当前对话）要么都非空**。
- *  与宿主 config.ts 的 modelSelectionValid 同一套规则（非法宿主回 400，这里先就地给红字提示）。 */
+/** 一处「服务商 + 模型」是否合法：要么都留空（跟随当前对话），要么都非空。
+ * 与宿主 `modelSelectionValid` 同一套规则（非法时宿主回 400，这里先就地给红字提示）。 */
 const modelPairValid = (m: ModelSelection): boolean => (m.provider.trim() === '') === (m.model.trim() === '');
 
-/** 候选清单里的一组：一个服务商 + 它名下的模型（GET /models 的响应形态） */
+/** 候选清单里的一组：一个服务商及它名下的模型（`GET /models` 的响应形态）。 */
 interface ModelCatalogGroup {
   id: string;
   name: string;
@@ -49,17 +41,10 @@ interface ModelCatalogGroup {
 }
 
 /**
- * 设置页内联 CSS（只服务「AI 模型」单下拉选择器）。
- *
- * 为什么要有 CSS 而不是全用行内 style：hover / focus-visible / 箭头旋转这些**伪类与过渡**
- * 行内样式表达不了，而这个选择器是照 DSH 对话框右下角的模型选择器做的——触发器要有 hover、
- * 浮层要有阴影与滚动，只能落到样式表。注入方式与宠物页面同一套（data-plugin-css 去重，
- * 官方插件标准做法）。
- *
- * 类名统一 dsh-pet-mp__ 前缀（mp = model picker），不会撞到 DSH 自己的类名。
+ * 设置页内联 CSS：只放伪类、悬浮、过渡与栅格这类行内样式表达不了的东西，其余排版走组件内联 style。
+ * 类名统一 `dsh-pet-` 前缀，注入方式与宠物页面一致（`data-plugin-css` 去重）。
  */
 const SETTINGS_CSS = [
-  // 触发器：与设置页其它控件同款描边，右侧箭头表示可展开
   '.dsh-pet-mp{position:relative;min-width:0;display:flex;flex-direction:column;gap:4px}',
   '.dsh-pet-mp__trigger{display:flex;align-items:center;gap:6px;width:100%;max-width:340px;height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px;text-align:left;cursor:pointer;outline:none}',
   '.dsh-pet-mp__trigger:hover:not(:disabled){border-color:var(--dsw-alias-state-business-primary)}',
@@ -69,9 +54,7 @@ const SETTINGS_CSS = [
   '.dsh-pet-mp__sub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex-shrink:1000;color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary))}',
   '.dsh-pet-mp__chevron{flex:none;margin-left:auto;color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary));transition:transform .12s}',
   '.dsh-pet-mp__chevron.is-open{transform:rotate(180deg)}',
-  // 浮层：position:fixed（与 DSH 一致——脱离设置页的滚动容器，不被 overflow 裁掉）
-  // 浮层：position:fixed（与 DSH 一致——脱离设置页的滚动容器，不被 overflow 裁掉）；
-  // z-index 取与插件右键菜单同一档（2147483000），保证压得住 DSH 自己的层叠上下文
+  // 浮层用 fixed 脱离设置页的滚动容器（不被 overflow 裁掉）；z-index 与插件右键菜单同一档。
   '.dsh-pet-mp__panel{position:fixed;z-index:2147483000;display:flex;flex-direction:column;gap:4px;padding:4px;overflow:hidden;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-md,10px);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-prominent,0 8px 30px rgba(0,0,0,.35));color:var(--dsw-alias-label-primary)}',
   '.dsh-pet-mp__search{box-sizing:border-box;width:100%;height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:13px;outline:none}',
   '.dsh-pet-mp__search:focus{border-color:var(--dsw-alias-state-business-primary)}',
@@ -85,20 +68,13 @@ const SETTINGS_CSS = [
   '.dsh-pet-mp__check{flex:none;margin-left:auto}',
   '.dsh-pet-mp__status{padding:8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}',
 
-  // ===================== 设置页骨架（重构后） =====================
-  // 这一段只放「伪类 / 悬浮 / 栅格」这类行内样式表达不了的东西；其余排版仍走组件里的行内 style。
-  // 类名统一 dsh-pet-cfg__ 前缀，不会撞 DSH 自己的类名。
-
-  // 页面根容器与标题
   '.dsh-pet-cfg{container-type:inline-size;display:flex;flex-direction:column;gap:12px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}',
   '.dsh-pet-cfg__title{display:flex;align-items:center;gap:6px;margin:0;font-size:16px;font-weight:500;line-height:24px}',
 
-  // 卡片：宠物配置 / 全局开关 / AI 模型 / 物理 / 高级配置 / 卸载与存储 统一用这一个框
   '.dsh-pet-cfg__card{display:flex;flex-direction:column;gap:10px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px}',
   '.dsh-pet-cfg__cardHead{display:flex;align-items:center;gap:6px;min-height:20px}',
   '.dsh-pet-cfg__cardTitle{font-size:13px;font-weight:500;color:var(--dsw-alias-label-primary)}',
 
-  // 栅格：列数固定 → 行与行的控件自然对齐成一列
   '.dsh-pet-cfg__grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 16px;align-items:end}',
   '.dsh-pet-cfg__grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px 16px;align-items:end}',
   '.dsh-pet-cfg__grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px;align-items:end}',
@@ -106,47 +82,36 @@ const SETTINGS_CSS = [
   '@container (max-width:600px){.dsh-pet-cfg__grid4{grid-template-columns:repeat(2,minmax(0,1fr))}}',
   '@container (max-width:400px){.dsh-pet-cfg__grid2,.dsh-pet-cfg__grid3,.dsh-pet-cfg__grid4{grid-template-columns:minmax(0,1fr)}}',
 
-  // 字段：标签（+ 问号）在上、控件在下
   '.dsh-pet-cfg__field{display:flex;flex-direction:column;gap:4px;min-width:0}',
   '.dsh-pet-cfg__flabel{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--dsw-alias-label-secondary)}',
 
-  // 输入 / 下拉
   '.dsh-pet-cfg__inp{box-sizing:border-box;width:100%;min-height:28px;padding:4px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;outline:none}',
   '.dsh-pet-cfg__inp:focus{border-color:var(--dsw-alias-state-business-primary)}',
   '.dsh-pet-cfg__inp:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
 
-  // 人设（多行输入）：复用 __inp 的边框/字号，只补高度与纵向拖拽缩放；
-  // 右下角一行纯展示字数（人设**没有**长度上限，与条目级 whisperPrompt 同一口径，故不阻断输入）
+  // 人设复用 __inp 的边框与字号，只补高度与纵向缩放；人设没有长度上限，右下角只显示字数、不阻断输入。
   '.dsh-pet-cfg__persona{display:flex;flex-direction:column;gap:2px;min-width:0}',
   '.dsh-pet-cfg__area{min-height:66px;resize:vertical;line-height:18px}',
   '.dsh-pet-cfg__count{font-size:11px;color:var(--dsw-alias-label-tertiary);text-align:right}',
 
-  // 开关（勾选框 + 标题 + 问号）
   '.dsh-pet-cfg__toggle{display:flex;align-items:center;gap:6px;min-width:0;font-size:13px;color:var(--dsw-alias-label-primary)}',
   '.dsh-pet-cfg__toggle>label{display:inline-flex;align-items:center;gap:6px;cursor:pointer;min-width:0}',
   '.dsh-pet-cfg__toggle>label>span{overflow-wrap:anywhere}',
   '.dsh-pet-cfg__toggle input[type=checkbox]{flex:none;width:16px;height:16px;margin:0;accent-color:var(--dsw-alias-state-business-primary);cursor:pointer}',
 
-  // 悬浮说明（通用件）：任何带 data-tip 的元素悬浮即出气泡——问号与保存按钮共用这一套。
-  // 组件侧用 tip() 生成属性（见 makePetConfigSection），不要为它包一层 DOM。
+  // 悬浮说明通用件：任何带 data-tip 的元素悬浮即出气泡，组件侧用 tip() 生成属性，不额外包 DOM。
   '.dsh-pet-cfg [data-tip]{position:relative}',
-  // 气泡默认**左对齐**到宿主（left:-4px），而不是居中。
-  // 为什么不能居中：宿主常常贴着卡片左缘（卡片头、栅格第一列、页标题），居中会让气泡
-  // 往左伸出一大截，被设置页的滚动容器（overflow 会连带裁掉横向）切掉——看起来就是
-  // 「气泡左边被左边框遮住」。左对齐则一律向右展开，左侧永不出界。
+  // 气泡默认左对齐：触发元素常贴卡片左缘，居中会向左伸出并被 overflow 裁掉；贴右缘的用 data-tip-end。
   '.dsh-pet-cfg [data-tip]::after{display:none;content:attr(data-tip);position:absolute;left:-4px;bottom:calc(100% + 8px);width:max-content;max-width:260px;padding:6px 10px;border-radius:8px;background:var(--dsw-alias-tooltip-bg);color:#fff;font-size:12px;font-style:normal;font-weight:400;line-height:18px;text-align:left;white-space:normal;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease;box-shadow:0 6px 20px rgba(0,0,0,.22);z-index:2147483000}',
   '.dsh-pet-cfg [data-tip]:hover::after{display:block;opacity:1;visibility:visible}',
-  // 最右一列 / 贴右缘的元素：改为右对齐，避免气泡顶出设置页右缘
   '.dsh-pet-cfg [data-tip][data-tip-end]::after{left:auto;right:-4px}',
 
-  // 问号：气泡的一个宿主外观（圆形 ?），说明机制本身来自上面的通用规则
+  // 问号：气泡的一个圆形宿主外观。
   '.dsh-pet-cfg__q{display:inline-flex;align-items:center;justify-content:center;flex:none;width:14px;height:14px;border:1px solid var(--dsw-alias-label-tertiary);border-radius:50%;color:var(--dsw-alias-label-tertiary);font-size:10px;font-style:normal;line-height:1;cursor:help;user-select:none}',
 
-  // 按钮
   '.dsh-pet-cfg__btn{border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-primary);border-radius:8px;padding:4px 14px;font:inherit;font-size:12px;line-height:20px;cursor:pointer;white-space:nowrap}',
-  // 实心主按钮**必须排除**在通用 hover 之外：interactive-bg-hover 是半透明白（#ffffff14），
-  // 直接顶掉 button-info-fill 会让蓝色保存按钮一悬停就变成一块发白的透明块，非常突兀。
-  // 实心按钮的 hover 走主题自己的 button-info-hover（更深的蓝）。
+  // 实心主按钮必须排除在通用 hover 外：半透明 hover 会顶掉 button-info-fill，让蓝色按钮一悬停就发白；
+  // 主按钮的 hover 走主题自己的 button-info-hover。
   '.dsh-pet-cfg__btn:hover:not(:disabled):not(.is-primary){background:var(--dsw-alias-interactive-bg-hover)}',
   '.dsh-pet-cfg__btn:disabled{opacity:.5;cursor:default}',
   '.dsh-pet-cfg__btn.is-primary{border-color:var(--dsw-alias-button-info-fill);background:var(--dsw-alias-button-info-fill);color:#fff}',
@@ -155,7 +120,6 @@ const SETTINGS_CSS = [
   '.dsh-pet-cfg__btn.is-sm{padding:2px 10px}',
   '.dsh-pet-cfg__btn.is-ghost{border-style:dashed;color:var(--dsw-alias-label-secondary)}',
 
-  // 宠物列表 tab
   '.dsh-pet-cfg__tabs{display:flex;gap:8px;flex-wrap:wrap;align-items:center}',
   '.dsh-pet-cfg__tabsLabel{font-size:12px;color:var(--dsw-alias-label-secondary)}',
   '.dsh-pet-cfg__tab{border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-primary);border-radius:8px;padding:4px 12px;font:inherit;font-size:13px;cursor:pointer}',
@@ -164,7 +128,6 @@ const SETTINGS_CSS = [
   '.dsh-pet-cfg__tab.is-active{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-active)}',
   '.dsh-pet-cfg__tab.is-ghost{border-style:dashed;color:var(--dsw-alias-label-secondary)}',
 
-  // 操作区 / 提示文字 / 路径
   '.dsh-pet-cfg__actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px}',
   '.dsh-pet-cfg__msg{margin-left:4px;font-size:12px;color:var(--dsw-alias-state-success-primary)}',
   '.dsh-pet-cfg__msg.is-err{color:var(--dsw-alias-state-error-primary)}',
@@ -175,7 +138,7 @@ const SETTINGS_CSS = [
 ].join('\n');
 
 const settingsCssTag = 'dsh-pet/settings.css';
-/** 注入设置页 CSS（只注入一次；与宠物页面 injectCss 同一套 data-plugin-css 去重） */
+/** 注入设置页样式，只注入一次。 */
 function injectSettingsCss(): void {
   if (typeof document === 'undefined') return;
   if (document.querySelector('style[data-plugin-css="' + settingsCssTag + '"]') !== null) return;
@@ -186,17 +149,18 @@ function injectSettingsCss(): void {
   document.head.appendChild(tag);
 }
 
-/** 选择器浮层里的一行：跟随当前对话 / 服务商分组头 / 模型 / 该服务商没有可用模型 */
+/** 选择器浮层里的一行：跟随当前对话、服务商分组头、模型或「该服务商没有可用模型」。 */
 type ModelRow =
   | { kind: 'follow'; key: string }
   | { kind: 'group'; key: string; name: string }
   | { kind: 'none'; key: string }
   | { kind: 'model'; key: string; provider: string; model: { id: string; name: string } };
 
+/** 设置页中文文案。 */
 export const zh = {
   nav: '桌宠配置',
   intro: '管理多个桌宠：每个宠物可独立设置大小与位置（保存后即时生效）。',
-  // 卡片标题 + 卡片级说明（说明都进问号，不再占一行小字）
+  // 卡片标题与卡片级说明；说明统一进问号气泡。
   petCardTitle: '宠物配置',
   petCardHint:
     '每只宠物独立配置：名字 / 大小 / 显示位置 / 位置 / 偏移 / 四个功能开关。改完点最下面的「保存」即时生效。',
@@ -206,7 +170,7 @@ export const zh = {
   cornerHint: '宠物贴着屏幕的哪个角（桌面端按各自显示器的工作区算）。',
   marginXHint: '距所选角落的水平距离（px），可为任意数字。',
   marginYHint: '距所选角落的垂直距离（px），可为任意数字。',
-  // 「/」命令菜单里的行标题（图标由 app.ts 经 command-faces.ts 补上）
+  // 「/」命令菜单的行标题（图标由 app.ts 经 command-faces.ts 补上）。
   'cmd.chat': '对话',
   'cmd.pet': '桌宠',
   'cmd.balance': '余额',
@@ -381,10 +345,11 @@ export const zh = {
   uninstallCmd: 'dsh plugin --profile {profile} remove dsh-pet',
 };
 
+/** 设置页英文文案。 */
 export const en = {
   nav: 'Pet Config',
   intro: 'Manage multiple pets: each pet has its own size and position (applies instantly after saving).',
-  // Card titles + card-level help (all hints move into the "?" bubble)
+  // 卡片标题与卡片级说明；说明统一进问号气泡。
   petCardTitle: 'Pet',
   petCardHint:
     'Per-pet settings: name / size / display / corner / offsets / the four feature switches. Click "Save" at the bottom to apply instantly.',
@@ -394,7 +359,7 @@ export const en = {
   cornerHint: 'Which screen corner the pet sticks to (per-monitor work area in desktop mode).',
   marginXHint: 'Horizontal distance from the chosen corner (px); any number.',
   marginYHint: 'Vertical distance from the chosen corner (px); any number.',
-  // Row titles in the "/" command menu (icons are added by app.ts)
+  // 「/」命令菜单的行标题（图标由 app.ts 补上）。
   'cmd.chat': 'Chat',
   'cmd.pet': 'Pet',
   'cmd.balance': 'Balance',
@@ -588,23 +553,11 @@ export const en = {
 };
 
 /**
- * 制造「桌宠配置」设置页组件（工厂函数）。
- *
- * 为什么是工厂而非直接定义组件：client 半侧是 __ModuleLoader__ 单文件形态，
- * react 能力不能顶层 import，只能由 DSH 的 require('react') 在运行时注入，
- * 因此把组件依赖作为参数传入，在工厂内制造出可用的组件后再注册进设置页插槽。
- *
- * @param rt        运行时注入的依赖集合
- * @param rt.h      react/jsx-runtime 的 jsx 函数（即 factory 里的 `h`）——
- *                  用于手写 React 元素，如 `h('button', { onClick, children: '保存' })`
- * @param rt.useState react 的 useState hook——管理页面内可变状态
- *                  （宠物列表 / 选中项 / 忙碌 / 保存消息），值变化时自动重渲染
- * @param rt.useRef react 的 useRef hook——「AI 模型」单下拉选择器用它拿触发器/浮层节点
- *                  （浮层定位与"点外面关闭"判定），与宠物页面同一份注入
- * @param rt.t      locale 绑定到本插件的翻译函数（ctx.locale.bind(NS)）——
- *                  取中英文文案，如 `t('nav')` → '桌宠配置' / 'Pet Config'
- * @returns PetConfigSection 组件：即整个「桌宠配置」设置页
- *          （props 仅有 close，由设置页外壳提供，本页当前未使用）
+ * 制造「桌宠配置」设置页组件。
+ * 浏览器半侧是 `__ModuleLoader__` 单文件形态，react 能力只能由宿主在运行时注入，
+ * 因此以工厂接收依赖，造出组件后再注册进设置页插槽。
+ * @param rt - 运行时注入的依赖：`h`、hooks 与翻译函数 `t`。
+ * @returns 设置页组件；`close` 由设置页外壳提供，本页未使用。
  */
 export function makePetConfigSection(rt: {
   h: typeof jsx;
@@ -617,7 +570,7 @@ export function makePetConfigSection(rt: {
 }): FunctionComponent<{ close?: () => void }> {
   const { h, useState, useEffect, useRef, useCallback, t } = rt;
 
-  // 设置页样式（只有模型选择器用得上：hover/焦点环/箭头旋转这些伪类行内样式表达不了）
+  // 样式注入幂等，重复渲染不会重复插入。
   injectSettingsCss();
 
   const CORNERS: Corner[] = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
@@ -625,10 +578,10 @@ export function makePetConfigSection(rt: {
 
   const inputClass = 'dsh-pet-cfg__inp';
 
-  /** 等宽字体栈（路径与命令展示用；不引外部字体，走系统栈，避免多拉一份资源） */
+  /** 等宽字体栈（路径与命令展示用），走系统栈以免多拉一份资源。 */
   const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace';
 
-  /** 生成一个未占用的宠物 id（pet-2、pet-3…） */
+  /** 生成一个未占用的宠物 id（pet-2、pet-3…）。 */
   const nextId = (list: Pet[]): string => {
     let n = 2;
     for (; ; n++) {
@@ -638,24 +591,17 @@ export function makePetConfigSection(rt: {
   };
 
   /**
-   * 悬浮说明（通用件，本页所有解释小字的唯一去处）：返回**展开到任意元素上**的属性，
-   * 带了它就悬浮出气泡（CSS 的 `[data-tip]::after`）。问号与保存按钮共用这一套。
-   *
-   * 为什么返回属性、而不是包一层 DOM 的组件：宿主常常在 flex 容器里（底部操作区、
-   * 卡片头），包一层会把 gap / 对齐 / 拉伸全打乱。展开属性则对布局零影响。
-   * 为什么走 data-tip + CSS 而不是行内样式：hover 与过渡只有 CSS 能表达。
-   *
-   * @param text 说明正文（已翻译）
-   * @param end 气泡右对齐（给栅格最右一列 / 贴右缘的元素用，免得气泡顶出设置页）
+   * 悬浮说明的展开属性：带 `data-tip` 即悬浮出气泡（CSS 的 `[data-tip]::after`）。
+   * 返回属性而不包一层 DOM，避免打乱外层 flex 的 gap / 对齐 / 拉伸；hover 与过渡只能由 CSS 表达。
+   * @param text - 说明正文（已翻译）。
+   * @param end - 气泡右对齐，给栅格最右列或贴右缘的元素用。
    */
   const tip = (text: string, end = false): Record<string, string> =>
     end ? { 'data-tip': text, 'data-tip-end': '' } : { 'data-tip': text };
 
   /**
-   * 问号说明入口：只是气泡的一个宿主外观（圆形 `?`），说明文字走 `tip()` 的同一套机制。
-   *
-   * 为什么用 `<i>` 而不是 `<button>`：它只是说明入口，点了不该有任何行为，也不该被
-   * Tab 当成操作项；真正的可交互入口是它旁边的输入框 / 开关。
+   * 问号说明入口：气泡的一个圆形触发元素，文字仍走 `tip()`。
+   * 用 `<i>` 而不是 `<button>`：它只展示说明，点了不该有行为，也不该进 Tab 顺序。
    */
   const q = (text: string, end = false): ReturnType<typeof h> =>
     h('i', {
@@ -666,7 +612,7 @@ export function makePetConfigSection(rt: {
       children: '?',
     });
 
-  /** 卡片头：标题 + 问号说明（+ 可选右侧动作，由调用方自行 append） */
+  /** 卡片头：标题与问号说明；右侧动作由调用方自行追加。 */
   const cardHead = (title: string, tip?: string, end = false): ReturnType<typeof h> =>
     h('div', {
       className: 'dsh-pet-cfg__cardHead',
@@ -676,7 +622,7 @@ export function makePetConfigSection(rt: {
       ],
     });
 
-  /** 一个字段：标签（+ 问号）在上、控件在下 */
+  /** 一个字段：标签（可带问号）在上、控件在下。 */
   const field = (label: string, control: ReturnType<typeof h>, tip?: string, end = false): ReturnType<typeof h> =>
     h('div', {
       className: 'dsh-pet-cfg__field',
@@ -691,9 +637,7 @@ export function makePetConfigSection(rt: {
     });
 
   /**
-   * 开关的一格：勾选框 + 标题 + 问号。
-   * label 为文案键：标题 = t(label)，说明 = t(label + 'Hint')（说明进问号，不再占一行小字）。
-   * 说明挂在问号上而不是整格——点标题只切开关，看说明去点问号，两个动作不再抢同一次点击。
+   * 开关的一格：勾选框、标题与问号；说明挂在问号上，点标题只切开关。
    */
   const toggleCell = (
     label: string,
@@ -723,23 +667,10 @@ export function makePetConfigSection(rt: {
     });
 
   /**
-   * 「模型」单下拉选择器（碎碎念 / 对话各一个实例）——照 DSH 对话框右下角的模型选择器写：
-   * 一个触发器按钮（当前模型 + 服务商小字 + 箭头）→ 点开一个浮层：搜索框 + 按服务商分组的
-   * 模型清单（选中项打勾），最上面一项是「跟随当前对话」。
-   *
-   * 与 DSH 那份的对应关系：
-   *  - 触发器 aria-haspopup/aria-expanded、浮层 role=menu、分组头 + role=menuitemradio[aria-checked]、
-   *    搜索 role=searchbox —— 无障碍语义一致；
-   *  - 浮层 position:fixed（脱离设置页滚动容器，不被 overflow 裁掉）+ 外部点击 / Esc 关闭 + 滚动跟随；
-   *  - 搜索是**大小写不敏感的有序子序列**匹配（DSH 同款：输入 dsc 能命中 DeepSeek Chat）；
-   *  - 数据来自 GET /models（宿主 llm 服务），与 DSH 模型选择器同一份来源。
-   *
-   * 为什么不用两个 <select>：DSH 自己就是"一个按钮 → 一个浮层里的分组清单"，两个下拉框既占地方，
-   * 又容易留下"选了服务商没选模型"的非法组合。这里也**不再提供**"手填模型 id"的退路：
-   * 列不出模型的服务商本来也没法调用，列出来只会诱人踩坑。
-   *
-   * 定义在工厂作用域（而非 PetConfigSection 内）：组件类型必须跨渲染稳定，否则每次渲染都会
-   * 重新挂载，浮层状态（打开/搜索词/高亮）会当场丢失。
+   * 「模型」单下拉选择器（碎碎念 / 对话各一个实例）：触发器 + 浮层（搜索 + 按服务商分组的清单）。
+   * 无障碍语义、浮层定位与搜索规则都对齐 DSH 自己的模型选择器；数据同源于 `GET /models`。
+   * 不用两个 `<select>`：既占地方，又容易留下只选了服务商没选模型的非法组合；也不提供手填模型 id 的退路。
+   * 定义在工厂作用域：组件类型必须跨渲染稳定，否则浮层状态（打开 / 搜索词 / 高亮）每次渲染都会丢。
    */
   const ModelPicker: FunctionComponent<{
     label: string;
@@ -1004,28 +935,23 @@ export function makePetConfigSection(rt: {
     const [msg, setMsg] = useState<{ kind: 'ok' | 'err' | ''; text: string }>({ kind: '', text: '' });
     // 设置页根节点：Ctrl+S 只在它可见时接管（DSH 若在别的设置页保持本组件挂载，不能把别人的快捷键抢走）
     const rootRef = useRef<HTMLElement | null>(null);
-    // 确认/提示弹窗（仿官方弹窗：遮罩 + 居中卡片 + 按钮）：
-    //   remove  —— 删除宠物（双按钮：取消 / 删除）
-    //   lastOne —— 只剩一只、删不了：同样走弹窗（单按钮「知道了」）。
-    //              以前这里是在按钮旁闪一行红字——位置在页面中段、颜色又淡，很容易被忽略，
-    //              用户只看到「点了删除没反应」。
-    //   sync    —— 同步（说明会用内置默认整份覆盖）
-    //   corrupt —— 保存时发现用户配置**已损坏**（解析不了）：取消 = 不动文件，确认 = 强行白名单重建
+    // 确认 / 提示弹窗（仿官方：遮罩 + 居中卡片 + 按钮）：
+    // remove 删除宠物、lastOne 只剩一只删不了、sync 同步覆盖、corrupt 用户配置已损坏（取消不动文件 / 确认强行重建）。
     const [dialog, setDialog] = useState<
       null | { kind: 'remove' } | { kind: 'lastOne' } | { kind: 'sync' } | { kind: 'corrupt'; path: string }
     >(null);
-    // 配置文件地址与存储位置清单（「高级配置」「卸载与存储」区块；读取失败仅缺省不显示，不影响表单）
+    // 配置文件地址与存储位置清单（「高级配置」「卸载与存储」区块）；读取失败时缺省不显示，不影响表单。
     const [paths, setPaths] = useState<null | {
       user: string;
       default: string;
       animations: string;
-      /** 用户表情包目录（$DSH_HOME/dsh-pet/memes：加图不必改包） */
+      /** 用户表情包目录（加图不必改包）。 */
       memes?: string;
-      /** 统一日志文件（$DSH_HOME/dsh-pet/logs.txt：桌面版没控制台，排障只看它） */
+      /** 统一日志文件；桌面版没控制台，排障只看它。 */
       logs?: string;
-      /** 插件落盘的全部位置（路径 + 是否已存在），host 按平台推导 */
+      /** 插件落盘的全部位置（路径与是否已存在），由宿主半侧按平台推导。 */
       storage?: Array<{ key: string; path: string; exists?: boolean }>;
-      /** 当前 profile 名（拼卸载命令用；反推不出时为空串） */
+      /** 当前 profile 名（拼卸载命令用；反推不出时为空串）。 */
       profile?: string;
     }>(null);
     useEffect(() => {
@@ -1035,52 +961,36 @@ export function makePetConfigSection(rt: {
         .catch(() => console.warn('[dsh-pet] 读取配置文件路径失败'));
     }, []);
 
-    // 系统通知总开关（全局：写用户级配置 main-config.jsonc 的 notificationsEnabled）。
-    // 与其余三个全局开关**完全同构**：切换只改本地 UI 状态，随「保存」一起整包写入。
-    // 为什么不做即时写入：PUT /config 会触发宿主重启桌面 Helper（全部桌面宠物窗口重建——
-    // 拖拽落点清空、宠物跳回配置角落），于是"改个通知开关，桌面被重置"，与其它开关行为不一致。
-    // 引擎重读放在 save() 成功之后（reloadNotifications）：保存后即时生效，无需刷新页面。
+    // 系统通知总开关：与其余全局开关同构，切换只改本地状态、随「保存」整包写入。
+    // 不做即时写入：PUT /config 会重启桌面 Helper，全部桌面宠物窗口重建（拖拽落点清空、宠物跳回角落）。
+    // 引擎重读放在 save() 成功后（reloadNotifications），保存后即时生效、无需刷新。
     const [notifyEnabled, setNotifyEnabled] = useState(true);
-    // 点击音效开关（全局：写用户级配置 main-config.jsonc 的 clickSoundEnabled）。
-    // 与通知开关同一套语义：只改本地状态，随「保存」整包写入（不做即时写入）。
-    // 初值 false = 内置默认（默认静音）；下面的加载效应会用成品 main.clickSoundEnabled 覆盖。
+    // 点击音效开关：同通知开关，随「保存」整包写入；初值 false 是内置默认，加载效应会用成品值覆盖。
     const [clickSound, setClickSound] = useState(false);
-    // 表情包配图开关（全局：写用户级配置；与「保存」一起提交，不做即时写入）
+    // 表情包配图开关（全局）：切换只改本地状态，随「保存」一起提交。
     const [whisperImage, setWhisperImage] = useState(false);
     const [chatImage, setChatImage] = useState(false);
-    // 抛掷锁定开关（全局：写用户级配置；与「保存」一起提交，不做即时写入）
+    // 抛掷锁定开关（全局）：切换只改本地状态，随「保存」一起提交。
     const [confineScreen, setConfineScreen] = useState(false);
-    // 系统托盘开关（全局：写用户级配置；与「保存」一起提交，不做即时写入）。
-    // 宿主读它决定两件事：建不建托盘图标，以及「没有桌面宠物时还值不值得为托盘常驻 Helper」。
+    // 系统托盘开关（全局）：随「保存」一起提交；宿主半侧据此决定建不建托盘、没桌面宠物时还值不值得常驻 Helper。
     const [trayEnabled, setTrayEnabled] = useState(true);
-    // 物理参数（全局：拖拽抛掷手感，写用户级配置 main-config.jsonc 的 physics 段）。
-    // 与四个开关同一套语义：只改本地状态，随「保存」整包写入（不做即时写入）。
-    // 初值仅作占位；成品配置加载成功后才允许编辑和保存。
+    // 物理参数（全局）：只改本地状态，随「保存」整包写入；初值仅占位，成品加载成功后才允许编辑与保存。
     const [physics, setPhysics] = useState<PhysicsParams>({ ...DEFAULT_PHYSICS });
-    // 字体（全局默认：字体种类 / 字号 / 是否随宠物大小缩放，写用户级配置的 font 段）。
-    // 与四个全局开关 / physics 同一套语义：只改本地状态，随「保存」整包写入（不做即时写入）。
-    // 初值仅作占位；成品配置加载成功后才允许编辑和保存。
+    // 字体（全局默认）：与 physics 同一套语义；初值仅占位，成品加载成功后才允许编辑与保存。
     const [font, setFont] = useState<FontConfig>({ ...DEFAULT_FONT });
-    // AI 模型（条目级：碎碎念 / 对话各自的服务商 + 模型，两者都留空 = 跟随当前对话的模型）。
-    // 与四个全局开关同一套语义：只改本地状态，随「保存」整包写入（不做即时写入）。
+    // AI 模型（条目级）：碎碎念 / 对话各自的服务商与模型，两者都留空 = 跟随当前对话；随「保存」整包写入。
     const [whisperModel, setWhisperModel] = useState<ModelSelection>({ provider: '', model: '' });
     const [chatModel, setChatModel] = useState<ModelSelection>({ provider: '', model: '' });
-    // 对话历史条数（全局默认：每次对话请求带多少历史进上下文，写用户级配置的 chatMemoryRounds）。
-    // 与两个模型 / 四个开关同一套语义：只改本地状态，随「保存」整包写入（不做即时写入）。
-    // 初值 5 = 内置默认（assets/config.jsonc）；下面的加载效应会用成品 main.chatMemoryRounds 覆盖。
+    // 对话历史条数（全局默认）：初值 5 是内置默认，加载效应会用成品 main.chatMemoryRounds 覆盖。
     const [chatMemory, setChatMemory] = useState(5);
-    // 对话配图张数上限（全局默认：对话时发给模型的表情包清单最多几张，写用户级配置的 chatImageLimit）。
-    // 同上：只改本地状态，随「保存」整包写入。初值 10 = 内置默认（砍掉整张清单的约 2/3 开销）；
-    // 加载效应会用成品 main.chatImageLimit 覆盖。
+    // 对话配图张数上限（全局默认）：初值 10 是内置默认（砍掉整张清单约 2/3 开销），加载后由成品值覆盖。
     const [chatImageLimit, setChatImageLimit] = useState(10);
-    // 条目级人设（main 那一份 whisperPrompt）：设置页只编辑**实例级**覆盖（pets[].whisperPrompt），
-    // 这个值只用于"留空时跟随什么"的预览（输入框占位符 + 问号说明），不参与提交。
+    // 条目级人设：设置页只编辑实例级覆盖（pets[].whisperPrompt）；这个值只用于「留空时跟随什么」的预览，不参与提交。
     const [entryPrompt, setEntryPrompt] = useState('');
-    // 候选清单（GET /models：宿主 llm 服务的实时服务商 + 各自模型，与 DSH 的模型选择器同源）。
-    // null = 还没拉到（下拉框只剩「跟随当前对话」）；拉失败置 catalogErr 显示一行提示。
+    // 候选清单：宿主半侧 llm 服务的实时服务商与模型；null = 还没拉到，拉失败置 catalogErr 显示一行提示。
     const [catalog, setCatalog] = useState<ModelCatalogGroup[] | null>(null);
     const [catalogErr, setCatalogErr] = useState(false);
-    // 权限申请按钮的反馈（就地显示在按钮旁，与全局保存反馈分离）
+    // 权限申请的反馈，就地显示在按钮旁，与保存反馈分离。
     const [permMsg, setPermMsg] = useState<{ kind: 'ok' | 'err' | ''; text: string }>({ kind: '', text: '' });
     // 首次读取与恢复默认必须更新同一组控件，避免下一次保存回写过期值。
     const applyConfig = useCallback((merged: Record<string, Record<string, unknown>>) => {
@@ -1114,7 +1024,7 @@ export function makePetConfigSection(rt: {
       if (cm && typeof cm.provider === 'string' && typeof cm.model === 'string') {
         setChatModel({ provider: cm.provider, model: cm.model });
       }
-      // 对话历史条数：成品同样已填满（内置默认 5 ← 用户层），合法就原样上屏
+      // 对话历史条数：成品已合并用户层与内置默认，合法就原样上屏。
       const cmr = Number(m.chatMemoryRounds);
       if (Number.isFinite(cmr) && cmr >= 0) setChatMemory(cmr);
       // 对话配图张数上限：同上（内置默认 0 = 不限制）
@@ -1162,20 +1072,17 @@ export function makePetConfigSection(rt: {
       };
     }, []);
 
-    // 切换系统通知：与配图/抛掷锁定开关同构——只改本地状态（开启时顺带借这次用户手势申请权限），
+    // 切换系统通知：与其余全局开关同构——只改本地状态（开启时顺带借这次用户手势申请权限），
     // 配置在点「保存」时整包写入；保存成功后由 save() 调 reloadNotifications() 让引擎即时重读。
     const toggleNotify = async (v: boolean) => {
       setNotifyEnabled(v);
-      // 开启时借用户手势申请系统通知权限（无手势的自动申请可能被浏览器静默压制）
+      // 开启时借用户手势申请系统通知权限（无手势的自动申请可能被浏览器静默压制）。
       if (v) await requestNotificationPermission();
     };
 
     /**
-     * 「测试弹窗」按钮：发一条测试系统通知，验证整条链路通不通。
-     *
-     * 顺带承担申请权限的职责——没授权时先申请（借这次用户手势，无手势的自动申请可能被浏览器
-     * 静默压制），授权成功再发测试通知。所以这一个按钮同时是「拿权限」和「验链路」的入口，
-     * 不需要再单独摆一个「获取权限」按钮。
+     * 「测试弹窗」按钮：发一条测试系统通知，验证整条链路。
+     * 没授权时先借这次用户手势申请权限，成功后再发通知；一个按钮兼做「拿权限」与「验链路」。
      */
     const testNotification = async () => {
       setPermMsg({ kind: '', text: '' });
@@ -1194,13 +1101,12 @@ export function makePetConfigSection(rt: {
         return;
       }
       try {
-        // 成功即发一条测试通知验证链路（绕过聚焦门，直接确认）
-        // 点击行为与真实事件通知共用 wireNotificationClick（否则测出来的链路和线上不是一条）
+        // 绕过聚焦门直接发一条测试通知；点击行为与真实事件通知共用 wireNotificationClick。
         wireNotificationClick(
           new Notification('测试通知', { body: '【dsh-pet】系统通知已就绪。', icon: NOTIFY_ICONS.test }),
         );
       } catch {
-        /* 个别环境构造失败：仍按已授权提示 */
+        /* 个别环境构造失败：仍按已授权提示。 */
       }
       setPermMsg({ kind: 'ok', text: t('notifyTestOk') });
     };
@@ -1273,10 +1179,8 @@ export function makePetConfigSection(rt: {
       return true;
     };
 
-    // force 只认严格 true：**绝不能**写成 `force ? ...`——保存按钮现在是包一层再调 save，
-    // 但历史上是把这个 handler 直接交给 React 的 onClick，于是 React 把 MouseEvent 当第一个
-    // 实参传进来 → 真值 → 每次都拼上 ?force=1 → 宿主的损坏预检被绕过 →
-    // 静默白名单重建、字段全丢、永不弹窗（真实事故，已由源码守卫钉住）。
+    // force 只认严格 true，绝不能写成 `force ? ...`：React 会把 MouseEvent 当第一实参传进来（真值），
+    // 从而拼上 ?force=1 绕过损坏预检、静默白名单重建、字段全丢。真实事故，已有源码守卫钉住。
     const save = async (force = false) => {
       if (busy) return;
       const isOk = validated();
@@ -1284,41 +1188,32 @@ export function makePetConfigSection(rt: {
       setBusy(true);
       setMsg({ kind: '', text: '' });
       try {
-        // 通知总开关随保存一起写：UI 状态初始来自成品 main 条目（即保留用户手写值，不会静默覆盖）
+        // 通知总开关随保存一起写；初值来自成品 main 条目，不会静默覆盖用户手写值。
         const body: Record<string, unknown> = {
           pets: pets,
           notificationsEnabled: notifyEnabled,
-          // 点击音效开关（全局布尔）：与通知开关一起提交，宿主校验后写进用户层
           clickSoundEnabled: clickSound,
           whisperImageEnabled: whisperImage,
           chatImageEnabled: chatImage,
           confineToScreen: confineScreen,
-          // 系统托盘开关（全局布尔）：宿主校验后写进用户层；关掉后桌面端起就不再建托盘图标
           trayEnabled: trayEnabled,
-          // 物理参数整段提交（白名单字段，未传即走宿主透传保留）：宿主用 physicsValid 整段校验
           physics: physics,
-          // 碎碎念 / 对话的模型（条目级白名单字段，同上）：宿主用 modelSelectionValid 整段校验，
-          // 两者都空 = 跟随当前对话的模型
           whisperModel: whisperModel,
           chatModel: chatModel,
-          // 对话历史条数（全局默认白名单字段）：宿主用 topFieldValid 校验（有限且 ≥ 0）
           chatMemoryRounds: chatMemory,
-          // 对话配图张数上限（同上；0 = 不限制）
           chatImageLimit: chatImageLimit,
-          // 字体（全局默认白名单字段）：宿主用 fontValid 整段校验（family 白名单 / size 4~200 /
-          // followPet 布尔）；传了就整段写进用户层，没传则透传保留磁盘旧值
           font: font,
         };
-        // force === true（用户在损坏弹窗里点了确认）：带 ?force=1 才允许按白名单重建损坏文件
+        // 用户在损坏弹窗里点了确认：带 ?force=1 才允许按白名单重建损坏文件。
         const res = await fetch('/dsh-pet-7340/config' + (force === true ? '?force=1' : ''), {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
         });
-        // 409 = 宿主损坏预检拦下（用户配置解析不了，白名单重建会把文件里剩下的内容整份丢掉）：
-        // 这里**不写盘**，弹窗让用户决定（取消 = 不动文件 / 确认 = 强行重建）
+        // 409 = 宿主损坏预检拦下（白名单重建会把文件里剩下的内容整份丢掉）：
+        // 这里不写盘，弹窗让用户决定（取消 = 不动文件 / 确认 = 强行重建）。
         if (res.status === 409) {
-          // 路径取宿主回的真实写入路径（meta 拉取失败时也不至于空着）
+          // 路径取宿主回的真实写入路径，meta 拉取失败时也不至于空着。
           const info = (await res.json().catch(() => null)) as { userFile?: unknown } | null;
           setDialog({
             kind: 'corrupt',
@@ -1332,7 +1227,7 @@ export function makePetConfigSection(rt: {
         }
         // 同上：PUT 响应即成品聚合，容器据此重新拍平（新增/删除宠物、改大小位置都走这条路）
         petBridge.reload((await res.json()) as Record<string, Record<string, unknown>>);
-        void reloadNotifications(); // 通知引擎重读开关：保存后即时生效，无需刷新页面
+        void reloadNotifications(); // 保存后即时生效，无需刷新。
         setMsg({ kind: 'ok', text: t('saved') });
       } catch {
         setMsg({ kind: 'err', text: t('saveError') });
@@ -1341,16 +1236,15 @@ export function makePetConfigSection(rt: {
       }
     };
 
-    // 快捷键要用**最新**的 save：save 每次渲染都重建（闭包捕获 pets / physics 等状态），
-    // 直接塞进 useEffect([]) 会拿着旧状态去存盘。这里转发一次，与 pet.ts 的 startThrowLatestRef 同一手法。
+    // 快捷键必须用最新的 save：save 每次渲染都重建（闭包捕获 pets / physics 等状态），
+    // 直接塞进 useEffect([]) 会拿旧状态存盘；这里每次渲染转发一次。
     const saveRef = useRef<() => void>(() => {});
     useEffect(() => {
       saveRef.current = () => void save();
     });
 
-    // Ctrl+S / Cmd+S 保存：配置项很长，改完上面几段不必滚到页面底部找「保存」。
-    // 只在本设置页可见时接管，且只在真要保存时才 preventDefault——否则在别处会把浏览器自带的
-    // 「保存网页」也拦掉（Ctrl+S 是浏览器保留键）。
+    // Ctrl+S / Cmd+S 保存：页面很长，改完不必滚到底部找按钮。
+    // 只在本设置页可见时接管，且只在真要保存时 preventDefault，否则会拦掉浏览器的「保存网页」。
     useEffect(() => {
       const onKey = (e: KeyboardEvent): void => {
         if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
@@ -1370,9 +1264,8 @@ export function makePetConfigSection(rt: {
       setBusy(true);
       setMsg({ kind: '', text: '' });
       try {
-        // 同步用户层：POST 把内置默认配置（原文，含注释）整份写入用户配置，响应体同样是成品聚合
-        // （此时 main 条目 = 内置默认宠物列表），与保存走同一条路——不再"改完再拉一次"，
-        // 也就没有中间失败态
+        // 同步用户层：POST 把内置默认配置（原文，含注释）整份写入用户配置，响应体同样是成品聚合。
+        // 之后与保存走同一条路，没有中间失败态。
         const res = await fetch('/dsh-pet-7340/config', { method: 'POST' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const merged = (await res.json()) as Record<string, Record<string, unknown>>;
@@ -1396,7 +1289,7 @@ export function makePetConfigSection(rt: {
         ...list,
         {
           id,
-          // 新宠物默认名字 = 自己的新 id（与「缺失 name 按 id 处理」同一语义，避免继承模板名字造成同名）
+          // 新宠物默认名字是自己的新 id（与「缺失 name 按 id 处理」同一语义，避免继承模板名字造成同名）。
           name: id,
           size: tpl.size,
           balanceEnabled: tpl.balanceEnabled,
@@ -1411,8 +1304,7 @@ export function makePetConfigSection(rt: {
     };
 
     const removeSel = () => {
-      // 两种情形都走弹窗：能删 → 确认删除；只剩一只 → 说明删不了。
-      // 不再把「至少保留一个宠物」塞进按钮旁的消息行（那里离删除按钮很远，等于没提示）。
+      // 两种情形都走弹窗：能删就确认删除；只剩一只则说明删不了。
       setDialog({ kind: pets.length <= 1 ? 'lastOne' : 'remove' });
     };
 
@@ -1422,7 +1314,7 @@ export function makePetConfigSection(rt: {
       setSelId(list[0].id);
     };
 
-    /** 宠物数值输入（大小 / 水平偏移 / 垂直偏移）——宽度交给栅格，不再各自写死 */
+    /** 宠物数值输入（大小 / 水平偏移 / 垂直偏移）；宽度交给栅格。 */
     const numInput = (
       key: 'size' | 'marginX' | 'marginY',
       value: number,
@@ -1438,7 +1330,7 @@ export function makePetConfigSection(rt: {
         onChange: (e: ChangeEvent<HTMLInputElement>) => setter(Number(e.target.value)),
       });
 
-    /** 物理参数的一格：标签 + 问号在上、数字输入在下（说明进问号） */
+    /** 物理参数的一格：标签与问号在上、数字输入在下。 */
     const physField = (
       key: 'gravity' | 'restitution' | 'groundFriction' | 'throwPower',
       step: string,
@@ -1461,7 +1353,7 @@ export function makePetConfigSection(rt: {
         end,
       );
 
-    /** 「全局默认」的一个数字格：标签 + 问号在上、数字输入在下（说明 = t(label + 'Hint') 进问号） */
+    /** 「全局默认」的数字格：标签与问号在上、数字输入在下。 */
     const globalNumField = (label: string, value: number, setter: (v: number) => void): ReturnType<typeof h> =>
       field(
         t(label),
@@ -1477,7 +1369,7 @@ export function makePetConfigSection(rt: {
         t(label + 'Hint'),
       );
 
-    /** 「AI 模型」的一格：标签 + 问号在上、单下拉选择器在下 */
+    /** 「AI 模型」的一格：标签与问号在上、单下拉选择器在下。 */
     const modelCell = (
       key: 'whisperModel' | 'chatModel',
       value: ModelSelection,
@@ -1498,7 +1390,7 @@ export function makePetConfigSection(rt: {
       className: 'dsh-pet-cfg',
       style: { maxWidth: '720px' },
       children: [
-        // 标题：intro 与「额外宠物」说明都收进问号，不再各占一行小字
+        // 标题：intro 与「额外宠物」说明都收进问号。
         h('h2', {
           className: 'dsh-pet-cfg__title',
           children: [
@@ -1528,7 +1420,7 @@ export function makePetConfigSection(rt: {
             })
           : null,
 
-        // 宠物列表 + 添加
+        // 宠物列表与添加按钮。
         h('div', {
           className: 'dsh-pet-cfg__tabs',
           children: [
@@ -1553,7 +1445,7 @@ export function makePetConfigSection(rt: {
           ],
         }),
 
-        // 选中宠物配置卡：第 1 行 名字/大小/显示位置、第 2 行 位置/偏移、第 3 行 四个开关
+        // 选中宠物配置卡：第一行名字、大小、显示位置，第二行位置与偏移，第三行四个开关。
         cur
           ? h('div', {
               className: 'dsh-pet-cfg__card',
@@ -1563,13 +1455,12 @@ export function makePetConfigSection(rt: {
                   children: [
                     h('span', { key: 't', className: 'dsh-pet-cfg__cardTitle', children: t('petCardTitle') }),
                     q(t('petCardHint')),
-                    // 右侧动作组：就近保存 + 删除。auto margin 挂在这层 wrapper 上，
-                    // 这样保存结果（msg）出现/消失时按钮位置不会跳。
+                    // 右侧动作组：auto margin 挂在这层 wrapper 上，保存结果出现 / 消失时按钮位置不会跳。
                     h('div', {
                       key: 'acts',
                       style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '6px' },
                       children: [
-                        // 保存结果就近反馈（与页面底部同一份 msg 状态）：否则在卡片上点保存看不到任何结果
+                        // 保存结果就近反馈（与页面底部同一份 msg 状态），否则在卡片上点保存看不到结果。
                         msg.text
                           ? h('span', {
                               key: 'msg',
@@ -1577,8 +1468,7 @@ export function makePetConfigSection(rt: {
                               children: msg.text,
                             })
                           : null,
-                        // 就近保存：宠物这一块改完就地存盘，不必滚到页面底部的「保存」。
-                        // 悬浮按钮即出气泡，内容就是两个键（tip()：与问号同一套机制）
+                        // 就近保存：宠物这一块改完就地存盘，不必滚到底部的「保存」；悬浮按钮即出快捷键气泡。
                         h('button', {
                           key: 'sv',
                           type: 'button',
@@ -1690,12 +1580,9 @@ export function makePetConfigSection(rt: {
                   ],
                 }),
 
-                // 人设（可选，**实例级**）：写在这只宠物上的 whisperPrompt，空 = 跟随所属条目的人设。
-                // 只做存储/回显，不在这里拼 system——拼装（名字声明 + 时间背景）在宿主侧
-                // （src/host/persona.ts），所以占位符只解释"最终会追加什么"，不复制那段逻辑。
-                // **占位符 = 条目人设正文**（entryPrompt）：空着的时候直接看到"跟随的是什么"，
-                // 比一句「留空 = 跟随条目」有用得多（设置页只编辑 main 条目的宠物，故恒为 main 那份）。
-                // 无 maxLength：人设没有长度上限（与条目级 whisperPrompt 同一口径），右下角只显示字数。
+                // 人设（可选，实例级）：写在这只宠物上的 whisperPrompt，空 = 跟随所属条目的人设。
+                // 只存储与回显，不在这里拼 system；拼装（名字声明 + 时间背景）在宿主半侧。
+                // 占位符直接用条目人设正文，让「跟随的是什么」可见；人设没有长度上限，右下角只显示字数。
                 field(
                   t('personaLabel'),
                   h('div', {
@@ -1724,11 +1611,8 @@ export function makePetConfigSection(rt: {
               children: t('emptyPets'),
             }),
 
-        // 全局开关卡（需求 4：四个开关一行；第 5 个「系统托盘」在 grid4 里自动换行到第二行）。
-        // 开关行为**一致**：切换只改本地状态，随「保存」整包写入用户级配置——不做即时写入
-        // （即时写盘会触发宿主重启桌面 Helper，把全部桌面宠物窗口重建一遍）。系统通知额外在保存后
-        // 由 save() 调 reloadNotifications() 让通知引擎即时重读。
-        // 「测试弹窗」按钮不在这里——它是个动作，跟「保存 / 同步」同一行（见下面的操作区）。
+        // 全局开关卡：切换只改本地状态，随「保存」整包写入——即时写盘会重启桌面 Helper、重建全部桌面宠物窗口。
+        // 系统通知额外在保存后由 save() 调 reloadNotifications() 重读；「测试弹窗」是动作，跟「保存 / 同步」同一行。
         h('div', {
           className: 'dsh-pet-cfg__card',
           children: [
@@ -1747,10 +1631,8 @@ export function makePetConfigSection(rt: {
           ],
         }),
 
-        // 外观与字体卡：字体种类 + 字号 + 是否随宠物缩放（全局默认，与全局开关 / physics 同语义——
-        // 只改本地状态，随「保存」整包写入用户配置；不做即时写入）。
-        // 字体种类的作用范围 = 现在用软糖体的全部地方（气泡 / 悬浮提示 / 对话窗 / 得分弹窗）；
-        // 字号**只**作用于气泡与悬浮提示（对话窗与得分弹窗的字号不随本项变，故不在此列）。
+        // 外观与字体卡（全局默认，与全局开关 / physics 同语义：只改本地状态、随「保存」整包写入）。
+        // 字体种类作用于现在用软糖体的全部文字；字号只作用于气泡与悬浮提示，对话窗与得分弹窗不变。
         h('div', {
           className: 'dsh-pet-cfg__card',
           children: [
@@ -1799,10 +1681,8 @@ export function makePetConfigSection(rt: {
           ],
         }),
 
-        // AI 模型与对话上下文卡（需求 5）：碎碎念 / 对话各自的服务商 + 模型，条目级——与四个开关
-        // 同一套语义，只改本地状态、随「保存」整包写入。host 侧生成时优先用它，失败自动回落。
-        // 第二行是对话历史条数（全局默认）：与两个模型同属「对话的上下文 / token 成本」，
-        // 所以同卡而不是塞进「全局开关」（那里是布尔开关）。
+        // AI 模型与对话上下文卡：碎碎念 / 对话各自的模型（条目级）与对话历史条数、配图张数上限（全局默认）。
+        // 都与四个开关同语义，只改本地状态、随「保存」整包写入；宿主半侧生成时优先用模型，失败自动回落。
         h('div', {
           className: 'dsh-pet-cfg__card',
           children: [
@@ -1831,8 +1711,7 @@ export function makePetConfigSection(rt: {
           ],
         }),
 
-        // 物理卡（需求 6）：四个数字输入一行 + 两个开关一行。
-        // 与上面四个开关同一套语义（只改本地状态，随「保存」整包写入；不做即时写入）。
+        // 物理卡：四个数字输入一行、两个开关一行；只改本地状态，随「保存」整包写入。
         // 浏览器保存后即时生效；桌面端由保存触发的 Helper 重启重新读取——physics 在 sprite 构造时只读一次。
         h('div', {
           className: 'dsh-pet-cfg__card',
@@ -1865,7 +1744,7 @@ export function makePetConfigSection(rt: {
           ],
         }),
 
-        // 操作区：「测试弹窗」与「保存 / 同步」同一行（都是动作）；「同步」的副作用说明收进问号
+        // 操作区：「测试弹窗」与「保存 / 同步」同一行；「同步」的副作用说明收进问号。
         h('div', {
           className: 'dsh-pet-cfg__actions',
           children: [
@@ -1874,7 +1753,7 @@ export function makePetConfigSection(rt: {
               disabled: busy,
               onClick: () => void save(),
               className: 'dsh-pet-cfg__btn is-primary',
-              // 悬浮按钮即出气泡，内容就是两个键（不写多余说明）
+              // 悬浮按钮即出快捷键气泡。
               ...tip(t('saveHotkey')),
               children: t('save'),
             }),
@@ -1892,7 +1771,7 @@ export function makePetConfigSection(rt: {
               children: t('notifyTest'),
             }),
             q(t('syncHint')),
-            // 两个反馈各归各的：msg = 保存/同步结果，permMsg = 测试通知结果
+            // 两个反馈各归各的：msg 是保存 / 同步结果，permMsg 是测试通知结果。
             msg.text
               ? h('span', {
                   className: 'dsh-pet-cfg__msg' + (msg.kind === 'err' ? ' is-err' : ''),
@@ -1908,7 +1787,7 @@ export function makePetConfigSection(rt: {
           ],
         }),
 
-        // 高级配置（文件地址）：供高级用户直接编辑配置文件自定义；说明收进问号
+        // 高级配置：直接编辑配置文件用的路径，说明收进问号。
         paths
           ? h('div', {
               className: 'dsh-pet-cfg__card',
@@ -1920,8 +1799,7 @@ export function makePetConfigSection(rt: {
                 paths.memes
                   ? h('div', { className: 'dsh-pet-cfg__path', children: t('memesDir') + '：' + paths.memes })
                   : null,
-                // 日志文件：路径 + 一句说明。其余位置的用途都收在问号里，唯独这条写在明面上——
-                // 用户反馈「宠物不出现 / 闪退」时，第一件事就是让他把这个文件找出来
+                // 日志文件路径 + 一句说明；其余位置的用途都在问号里，唯独这条写在明面上——反馈问题时要先找它。
                 paths.logs
                   ? h('div', { className: 'dsh-pet-cfg__path', children: t('logFile') + '：' + paths.logs })
                   : null,
@@ -1930,20 +1808,20 @@ export function makePetConfigSection(rt: {
             })
           : null,
 
-        // 卸载与存储：先列出插件落盘的全部位置（路径在前、作用在后），再给出卸载方法；说明收进问号
+        // 卸载与存储：先列出插件落盘的全部位置（路径在前、作用在后），再给出卸载方法。
         paths && paths.storage && paths.storage.length > 0
           ? h('div', {
               className: 'dsh-pet-cfg__card',
               children: [
                 cardHead(t('storageTitle'), t('storageHint')),
-                // 存储位置清单：每条都是「路径（等宽、可选中复制）→ 作用」
+                // 存储位置清单：每条都是「路径（等宽、可选中复制）到作用」。
                 ...paths.storage.map((s) =>
                   h('div', {
                     key: s.key,
                     className: 'dsh-pet-cfg__path',
                     children: [
                       h('b', { key: 'p', style: { fontFamily: MONO }, children: s.path }),
-                      // 尚未产生的目录（如从未启用桌面模式的 Electron）标一下，避免用户去找不存在的文件夹
+                      // 尚未产生的目录标一下，避免用户去找不存在的文件夹。
                       h('span', {
                         key: 'd',
                         children: ' — ' + t('storage.' + s.key) + (s.exists === false ? t('storageMissing') : ''),
@@ -1969,7 +1847,7 @@ export function makePetConfigSection(rt: {
             })
           : null,
 
-        // 确认/提示弹窗（仿官方弹窗视觉：遮罩 + 居中卡片 + 按钮）
+        // 确认 / 提示弹窗（仿官方视觉：遮罩 + 居中卡片 + 按钮）。
         dialog
           ? h('div', {
               style: {
@@ -2014,7 +1892,7 @@ export function makePetConfigSection(rt: {
                   }),
                   h('div', {
                     style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' },
-                    // 只剩一只 = 没有可确认的动作，只给一个「知道了」；其余都是 取消 + 确认 双按钮
+                    // 只剩一只没有可确认的动作，只给「知道了」；其余都是取消 + 确认双按钮。
                     children:
                       dialog.kind === 'lastOne'
                         ? [
@@ -2042,7 +1920,7 @@ export function makePetConfigSection(rt: {
                                 setDialog(null);
                                 if (d.kind === 'remove') doRemove();
                                 else if (d.kind === 'corrupt')
-                                  void save(true); // 确认：带 ?force=1 强行重建
+                                  void save(true); // 确认：带 ?force=1 强行重建。
                                 else void doSync();
                               },
                               className: 'dsh-pet-cfg__btn ' + (dialog.kind === 'sync' ? 'is-primary' : 'is-danger'),

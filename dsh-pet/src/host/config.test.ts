@@ -948,7 +948,7 @@ describe('readAllConfig —— 宠物固定合并（缺失取默认 / 非法回�
 });
 
 describe('syncUserConfigFromDefault —— 同步（内置默认原文写入用户层）', () => {
-  /** 默认文件写入给定原文；用户文件故意放在**尚不存在**的子目录里（验证父目录自建） */
+  /** 默认文件写入给定原文；用户文件故意放在尚不存在的子目录里（验证父目录自建） */
   function fixture(raw: string): { paths: ConfigPaths; dir: string } {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-pet-sync-test-'));
     const paths: ConfigPaths = {
@@ -987,7 +987,7 @@ describe('syncUserConfigFromDefault —— 同步（内置默认原文写入用�
     try {
       const before = readAllConfig(paths); // 无用户层：纯内置默认
       syncUserConfigFromDefault(paths);
-      // deepStrictEqual：值/结构必须完全一致。**不看键顺序**——用户层会走 mergePets 重建实例，
+      // deepStrictEqual：值/结构必须完全一致。不看键顺序——用户层会走 mergePets 重建实例，
       // 键序被规范化为 id 在前（纯外观差异；已用生产 assets/config.jsonc 实测确认值完全一致）。
       assert.deepStrictEqual(readAllConfig(paths), before);
     } finally {
@@ -1011,9 +1011,9 @@ describe('syncUserConfigFromDefault —— 同步（内置默认原文写入用�
  * 文件宠物条目的基座 —— 「全局默认 + 种类可覆盖」。
  *
  * 判据：GLOBAL_DEFAULT_KEYS 那 9 个（physics / confineToScreen / 两个配图开关 / chatImageLimit /
- * chatMemoryRounds / whisperModel / chatModel / eventsRefreshSec）是**用户级「成本 / 偏好 /
- * 环境 / 节奏」参数**，用户层写了就对**所有条目**生效（含 pet pack）；种类文件自己写了就覆盖
- * 自己那份。其余顶层字段（人设 / 表情包 / 动画池 / 文案）的基座仍是**内置默认**——
+ * chatMemoryRounds / whisperModel / chatModel / eventsRefreshSec）是用户级「成本 / 偏好 /
+ * 环境 / 节奏」参数，用户层写了就对所有条目生效（含 pet pack）；种类文件自己写了就覆盖
+ * 自己那份。其余顶层字段（人设 / 表情包 / 动画池 / 文案）的基座仍是内置默认——
  * 一个种类一份人设、一份池、一个表情包目录，各写一份才是 pet pack 的意义。
  */
 describe('文件宠物条目 —— 全局默认（用户层作基座）+ 种类可覆盖', () => {

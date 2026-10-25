@@ -1,23 +1,12 @@
 #!/usr/bin/env node
 /**
- * prepare.js —— 发布前微调（构建完整产物 + 收敛 files）
+ * 发布前微调：跑完整构建（tsdown → lib、共享层 → shared-core.js、tsc → 类型声明），
+ * 再把 package.json 的 files 收敛成发布清单。幂等：跑一次即定格，再跑结果不变，无需备份或恢复。
  *
- * 插件只发布**单一 webm 格式**（VP9-alpha）：浏览器 overlay 的
- * Chrome/Edge/Firefox 与桌面模式（Electron = Chromium）共用同一格式
- * （源码写死 .webm，无发布期注入）。Safari/HEVC(mov) 兼容由仓库保留的
- * 流水线（scripts/encode_hevc_alpha.sh + hevc_alpha_encoder.swift +
- * .github/workflows/hevc-alpha.yml）支持——需要兼容 Safari 者 fork
- * 仓库后自行启用，不参与本插件的发布流程。
- *
- * 做什么：
- *   1. 构建（npm run bundle：tsdown 把 src/ → lib/）
- *   1.5 构建桌面共享核心（npm run build:desktop-core：src/shared → window.PetShared）
- *   1.6 生成类型声明（npm run types：tsc → lib/types/*.d.ts）
- *   2. 改写 package.json：files 收敛为发布清单（含桌面模式运行时 runtime/electron-helper、
- *      表情包 assets/memes）—— 幂等：跑一次即定格为当前状态，再跑结果不变，无需备份/恢复
- *
- * 用法：node scripts/prepare.js（npm run build；npm publish / npm pack 经 prepack 自动执行）
- * 发布：npm publish --tag latest
+ * 只发布单一 webm 格式（VP9-alpha），浏览器与桌面 Helper 共用，源码写死 .webm、发布期不做注入；
+ * Safari/HEVC 兼容由仓库保留的流水线支持、需 fork 后自行启用，不参与本插件发布链。
+ * 依赖 package.json 里的 bundle / build:desktop-core / types 三个脚本与本地 node_modules。
+ * @module dsh-pet/scripts/prepare
  */
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -27,9 +16,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const PKG = join(ROOT, 'package.json');
 
-// 1. 构建 src → lib
-// Windows 下 npm 是 npm.cmd，spawnSync 无法直接执行 .cmd；用 cmd /c 跑整条命令
-// （固定命令行，无用户输入，无注入风险）
+// 用 cmd /c 跑整条 npm 命令：Windows 下 npm 是 npm.cmd，spawnSync 无法直接执行 .cmd
+// （命令行固定、无用户输入，没有注入风险）。
 console.log('[prepare] building (tsdown)...');
 const npmRun = process.platform === 'win32' ? 'cmd /c npm run bundle' : 'npm run bundle';
 const build = spawnSync(npmRun, { cwd: ROOT, stdio: 'inherit', shell: true });
@@ -38,7 +26,7 @@ if (build.status !== 0) {
   process.exit(1);
 }
 
-// 1.5 构建桌面共享核心（src/shared → window.PetShared 经典 script；与浏览器 bundle 同一份源码）
+// 桌面共享核心与浏览器 bundle 取自同一份 src/shared，产出 window.PetShared（详见 build-desktop-core.mjs）。
 console.log('[prepare] building desktop shared-core...');
 const coreRun = process.platform === 'win32' ? 'cmd /c npm run build:desktop-core' : 'npm run build:desktop-core';
 const buildCore = spawnSync(coreRun, { cwd: ROOT, stdio: 'inherit', shell: true });
@@ -47,7 +35,7 @@ if (buildCore.status !== 0) {
   process.exit(1);
 }
 
-// 1.6 生成类型声明（lib/types/*.d.ts，tsc 产出；构建产物不入 git，克隆后由本步骤补齐）
+// 类型声明是构建产物、不入 git，克隆后靠这一步补齐；漏跑则 exports 声明的 types 路径全空。
 console.log('[prepare] generating types (npm run types)...');
 const typesRun = process.platform === 'win32' ? 'cmd /c npm run types' : 'npm run types';
 const buildTypes = spawnSync(typesRun, { cwd: ROOT, stdio: 'inherit', shell: true });
@@ -56,7 +44,7 @@ if (buildTypes.status !== 0) {
   process.exit(1);
 }
 
-// 2. 改写 package.json：files 收敛为发布清单（幂等，无备份）
+// files 收敛为发布清单：这是本脚本唯一的写操作，幂等，不备份旧值。
 const pkg = JSON.parse(readFileSync(PKG, 'utf8'));
 const keep = [
   'lib',
@@ -65,17 +53,13 @@ const keep = [
   'runtime/electron-helper',
   'assets/fonts',
   'assets/pic',
-  // 表情包（碎碎念/对话配图的图片）：host 只从**包内** assets/memes 读图、与配置 memes 键配对，
-  // 漏掉它 → 包内一张图都没有、配图功能整体失效。注意本函数每次发布（npm install/publish）都会
-  // 用这个数组**覆盖** package.json 的 files，所以"只在 package.json 里加一行"是无效的，必须加在这里
+  // 表情包：宿主半侧只从包内 assets/memes 读图，并与配置的 memes 键配对，漏掉即配图功能整体失效。
+  // 本数组每次发布都覆盖 package.json 的 files，所以必须加在这里，只在 package.json 里加一行无效。
   'assets/memes',
-  // 点击音效（assets/sound/click-duck.wav）：host 的 /sound 路由只从**包内**这一份读，
-  // 漏掉它 → npm 包里没有音频，点击静音。与 memes 同理，必须加在这个数组里而不是 package.json
+  // 点击音效：宿主半侧的 /sound 路由只读包内这一份，漏掉则点击静音；同 memes，必须加在本数组。
   'assets/sound',
   'assets/config.jsonc',
-  // 插件图标（DSH 插件管理页显示）：package.json 顶层 icon 字段指向这张图。
-  // 与 memes 同理——本数组会覆盖 package.json 的 files，漏掉它则 npm 包里没有这张图，
-  // 读取方 dsh-app-boot 的 iconOf 找不到文件会抛错，图标退回默认插画
+  // 插件图标：package.json 顶层 icon 指向这张图；缺图时读取方 dsh-app-boot 的 iconOf 会抛错、退回默认插画。
   'assets/logo.png',
   'scripts/ensure-electron.mjs',
   'cordis.patch.yml',

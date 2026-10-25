@@ -1,28 +1,24 @@
-// 配置层（src/shared 单一来源，浏览器 bundle 与桌面 shared-core 共用）：
-// 配置的读取/合并/校验收敛在 host（src/host/config.ts 的 readAllConfig，经
-// GET /dsh-pet-7340/config 暴露成品）；本模块只做一件事：把**成品聚合**
-// （{ main: {...}, test1: {...}, ... }，字段已填满、绝对正确）拍平成渲染用宠物列表，
-// 条目级字段（animations / animationWeights / eventsRefreshSec / physics / font / confineToScreen /
-// workStatusTexts / whisperModel / chatModel）吹进每只实例——它们都是「所属条目一份、多实例共享」；
-// 其中 10 个「全局默认」字段的条目值来自用户层（main-config.jsonc），见 types.ts / host/config.ts。
-// 不依赖 React/DOM；host 因 DSH 单文件加载约束不 import 本目录。
+/**
+ * 共享层：把宿主半侧的成品配置拍平成渲染用宠物列表。
+ * 不负责读取、合并与校验——那是宿主半侧 readAllConfig 的职责，本层只消费其结果。
+ * 不依赖 React / DOM；宿主半侧不 import 本目录，其配置实现自包含、规则须与本层同步。
+ * 条目级字段必须吹进每只实例：多实例共享所属条目的同一份值。
+ * @module dsh-pet/src/shared/config
+ */
 import type { Animations, FontConfig, ModelSelection, Pet, PetDisplay, PhysicsParams, Weights } from './types';
 
-/** 显示位置白名单 */
+/** 显示位置白名单。 */
 export const PET_DISPLAYS: PetDisplay[] = ['web', 'desktop', 'both', 'none'];
 
-/** 该宠物是否参与浏览器 overlay 渲染 */
+/** 该宠物是否参与浏览器半侧渲染。 */
 export const isWebVisible = (display: PetDisplay): boolean => display === 'web' || display === 'both';
 
-/** 该宠物是否参与桌面模式（Electron 透明窗）渲染 */
+/** 该宠物是否参与桌面模式（Electron 透明窗）渲染。 */
 export const isDesktopVisible = (display: PetDisplay): boolean => display === 'desktop' || display === 'both';
 
-/** 把 host 的成品聚合拍平成渲染用宠物列表：
- *  条目级字段（animations / animationWeights / eventsRefreshSec / physics / font / confineToScreen /
- *  workStatusTexts / whisperModel / chatModel——合并器已填好；其中 10 个「全局默认」字段的
- *  条目值来自用户层，见 types.ts / host/config.ts）吹进每只实例；
- *  assetRoot = 条目 key（= 素材根，多实例共享）；非 main 条目的实例打 extra 标记
- *  （文件宠物：设置页不可编辑、保存时排除）。 */
+/** 把成品聚合拍平成渲染用宠物列表。
+ *  条目级字段（animations / physics / font 等）由所属条目一份、多实例共享；assetRoot 取条目 key，
+ *  即素材根。非 main 条目打 extra 标记：文件宠物在设置页不可编辑、保存时排除。 */
 export function flattenConfigPets(merged: Record<string, Record<string, unknown>>): Pet[] {
   const out: Pet[] = [];
   for (const [entry, conf] of Object.entries(merged)) {

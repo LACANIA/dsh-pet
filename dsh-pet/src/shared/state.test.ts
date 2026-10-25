@@ -271,7 +271,7 @@ describe('readSay —— 说话叶子（弹气泡 / 清空 两种形态）', () 
     for (const v of [42, {}, null, undefined]) {
       assert.equal(say({ text: 'x', url: v })?.url, undefined, `url=${JSON.stringify(v)} 应归一成 undefined`);
     }
-    // 空串与 image 同口径：**原样透传**——读取器只做类型收窄，不做 trim / 非空判定
+    // 空串与 image 同口径：原样透传——读取器只做类型收窄，不做 trim / 非空判定
     //（非空由宿主写端保证）。消费端拿到空串会走纯文本路径，无副作用。
     assert.equal(say({ text: 'x', url: '' })?.url, '');
     assert.equal(say({ text: 'x', url: 42 })?.text, 'x');

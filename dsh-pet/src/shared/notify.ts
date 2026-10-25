@@ -1,14 +1,11 @@
-// 系统通知：事件帧 → toast 文案映射（src/shared 单一来源）。
-// 这是**独立于宠物**的能力（监测 DSH 事件 → 弹系统 toast），天然只随 DSH 网页端走：
-//   - 浏览器半侧 notify.ts 轮询 host 的 /dsh-pet-7340/notify 增量帧队列，消费本映射；
-//   - 帧由 host 侧监听 DSH 宿主事件生成（turn/end、approval/asked、tool/call-ask_user_question、
-//     agent/error，见 host/notify-events.ts）——DSH 0.1.5 删除了浏览器侧 api.events.mux/host
-//     事件流，旧实现就是经该流（session/event、approval/requested、question/requested 与
-//     host/agent-error）消费本映射，帧契约不变，只是帧的产地从浏览器直连改为 host 转发；
-//   - 桌面模式是宠物本体，不重复实现通知（宠物 ≠ 通知；「两端一致」只约束宠物行为）。
-// 纯函数无副作用；帧形状不匹配/不认识的类型一律返回 null（不弹、不报错）。
-
-/** 通知图标文件名（不含扩展名；浏览器半侧拼完整 URL：/dsh-pet-7340/pic/<name>.png） */
+/**
+ * 系统通知：DSH 事件帧 → toast 文案的映射，只随浏览器半侧走。
+ * 帧由宿主半侧监听 DSH 宿主事件生成（见 host/notify-events.ts），浏览器轮询 /notify 的增量队列消费本映射。
+ * 桌面模式是宠物本体，不重复实现通知（宠物不等于通知，「两端一致」只约束宠物行为）。
+ * 纯函数无副作用：帧形状不匹配或不认识的类型一律返回 null，不弹也不报错。
+ * @module dsh-pet/src/shared/notify
+ */
+/** 通知图标文件名（不含扩展名）；浏览器半侧拼完整 URL：/dsh-pet-7340/pic/<name>.png。 */
 export const NOTIFY_ICONS = {
   done: 'notify-done',
   error: 'notify-error',
@@ -18,23 +15,24 @@ export const NOTIFY_ICONS = {
   test: 'notify-test',
 } as const;
 
+/** 文案截断长度上限（字符）。 */
 export const MAX_BODY = 80;
 
-/** 文案截断（与弹窗一致：超长只留前 80 字符） */
+/** 文案截断（与弹窗一致：超长只留前 80 字符）。 */
 export function truncate(text: string): string {
   return text.length > MAX_BODY ? text.slice(0, MAX_BODY) + '…' : text;
 }
 
-/** 通知帧（浏览器 mux/host 流的帧形状） */
+/** 通知帧：宿主半侧转发过来的一条 DSH 事件。 */
 export interface NotifyFrame {
   type: string;
-  /** 发出这条通知的会话 id（host 侧 sessionIdOf 填）。点击通知时据此跳到那条会话；
-   *  没有会话位置的事件（host/agent-error）不带这个字段，消费端把缺失一律当成"只叫窗口"。 */
+  /** 发出这条通知的会话 id；点击通知时据此跳到那条会话。
+   *  没有会话位置的事件（host/agent-error）不带这个字段，消费端把缺失当成「只叫窗口」。 */
   sessionId?: string;
   [key: string]: unknown;
 }
 
-/** session/event 帧里的 turn/end 事件形状 */
+/** turn/end 事件在帧里的形状。 */
 interface TurnEndEvent {
   type?: string;
   data?: {
@@ -42,7 +40,7 @@ interface TurnEndEvent {
   };
 }
 
-/** 帧 → toast 文案；不认识的类型 / turn/end 的非弹分支（aborted 等）返回 null */
+/** 帧 → toast 文案；不认识的类型或 turn/end 的非弹分支（aborted 等）返回 null。 */
 export function frameToToast(frame: NotifyFrame): { title: string; body: string; icon: string } | null {
   switch (frame.type) {
     case 'session/event': {

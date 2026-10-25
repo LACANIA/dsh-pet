@@ -1,10 +1,10 @@
 /**
- * 独立模式体检（`--check`）：不 `apply`、不起窗口、不联网，只回答"为什么能/不能跑起来"。
+ * 独立模式体检：只读取配置与 Electron 解析结果并打印报告。
  *
- * 为什么单独一份而不是复用路由：体检的价值恰恰在于**不启动宿主**（否则一跑就把桌宠窗口拉起来，
- * 排查"没出现"时反而多一个变量）。因此这里直接读插件自己的纯模块
- * （`host/config.ts` 的 readAllConfig/flattenPetList、`host/helper-process.ts` 的 Electron 解析），
- * 与插件内运行时读的是同一份配置与同一套解析规则。
+ * 不启动宿主、不建窗口、不发网络请求，因此不会掩盖桌宠没出现的现场。
+ * 依赖插件自己的纯模块，与运行时读的是同一份配置和同一套解析规则。
+ * 必须始终成立：报告只描述事实，缺包内默认配置时以非零码退出。
+ * @module dsh-pet/src/standalone/check
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -20,7 +20,7 @@ import {
 import type { StandaloneLogger } from './context';
 import { configPathsFor, describePets, isDesktopVisible } from './options';
 
-/** 包版本（读不到就 unknown）—— 体检报告与启动横幅共用 */
+/** 读包版本，读不到时返回 unknown。 */
 export function packageVersion(root: string): string {
   try {
     const parsed = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version?: unknown };
@@ -32,8 +32,8 @@ export function packageVersion(root: string): string {
 
 /**
  * 打印体检报告。
- * @param logger 输出目标
- * @returns 进程退出码：0 = 就绪；1 = 缺包内默认配置或配置读不出来
+ * @param logger - 输出目标。
+ * @returns 进程退出码：0 表示就绪，1 表示缺包内默认配置或配置读不出来。
  */
 export function runCheck(logger: StandaloneLogger): number {
   const home = dshHomeDir();
@@ -51,12 +51,14 @@ export function runCheck(logger: StandaloneLogger): number {
   ];
 
   const fail = (message: string): number => {
+    // 先打完整报告再报错，读者能一次看到全部环境信息。
     for (const line of lines) logger.info(line);
     logger.error(message);
     return 1;
   };
 
   if (!existsSync(paths.defaultFile)) {
+    // 直接跑源码时包根会指向 src/，这里提示改用构建产物。
     return fail(
       '包内默认配置读不到：很可能是在**直接跑源码**（包根被解析成了 src/）。' +
         '独立模式请用构建产物：npm run bundle 后 node lib/standalone.js，或 npm run standalone。',
@@ -68,6 +70,7 @@ export function runCheck(logger: StandaloneLogger): number {
     const entries = Object.keys(merged);
     lines.push(`配置条目        ${entries.length} 个：${entries.join(', ') || '（空）'}`);
     for (const entry of entries) {
+      // 按条目汇总宠物数与 idle 动画数，便于发现空配置。
       const conf = merged[entry] ?? {};
       const pets = Array.isArray(conf.pets) ? (conf.pets as Record<string, unknown>[]) : [];
       const animations = conf.animations as { idle?: unknown[] } | undefined;
@@ -75,6 +78,7 @@ export function runCheck(logger: StandaloneLogger): number {
       lines.push(`  条目 ${entry}：宠物 ${pets.length} 只  ${describePets(pets)}｜idle 动画 ${idle} 个`);
     }
     const desktopVisible = flattenPetList(merged).filter(isDesktopVisible);
+    // 只有 display 为 desktop 或 both 的宠物会真的出现在桌面上。
     lines.push(
       `桌面小窗        ${desktopVisible.length} 只${
         desktopVisible.length === 0 ? '（display 需要 desktop 或 both，否则独立模式没有可显示的宠物）' : ''

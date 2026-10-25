@@ -1,3 +1,12 @@
+/**
+ * 独立应用的 HTTP 入口：插件路由、AI 配置页与状态页共用同一个本机服务。
+ *
+ * 只做路由与请求边界（去重、限长、CORS、错误兜底），不实现各路由的业务逻辑；对 Electron 无依赖，
+ * 便于直接测非法与不可信请求。依赖 standalone 的页面与安全模块，安全判定一律先于分发。
+ *
+ * @module dsh-pet/src/app/router
+ */
+
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -7,6 +16,7 @@ import { rejectRequest, type RequestSecurity } from '../standalone/request-secur
 import { settingsHandler, testHandler, type StandaloneServerOptions } from '../standalone/server';
 import { settingsPage, settingsScript, settingsStyle } from '../standalone/settings-page';
 
+/** 路由依赖：安全校验、AI 处理器与两个页面的数据源，全部注入以脱离 Electron 测试。 */
 interface RouterDeps {
   security: RequestSecurity;
   ai?: StandaloneServerOptions['ai'];
@@ -15,7 +25,11 @@ interface RouterDeps {
   landingPage(port: number): string;
 }
 
-/** App HTTP boundary, isolated from Electron so malformed and untrusted requests can be tested. */
+/**
+ * 启动本机服务并返回实际端口与关闭函数。
+ *
+ * 只监听 127.0.0.1 的随机端口；请求体在进入处理器前先按路由限长读取。
+ */
 export function startRouter(
   routes: RegisteredRoute[],
   deps: RouterDeps,
@@ -37,7 +51,7 @@ export function startRouter(
         ? url.pathname === candidate.path
         : url.pathname === candidate.path || url.pathname.startsWith(`${candidate.path}/`),
     );
-    // Only plugin calls may come from a file renderer, and even those require its capability.
+    // 只有插件路由接受来自 file 渲染端的请求，且仍需它自己的凭证。
     if (!deps.security.authorize(req, res, !!route)) return;
     const method = req.method ?? 'GET';
     if (method === 'OPTIONS') {
@@ -73,7 +87,7 @@ export function startRouter(
         res.end('not found');
         return;
       }
-      // CORS is useful to the authenticated file renderer; it grants no capability by itself.
+      // CORS 只让已鉴权的 file 渲染端可用，它本身不授予任何能力。
       res.setHeader('access-control-allow-origin', '*');
       await route.handler(request, res);
     };
@@ -87,7 +101,7 @@ export function startRouter(
         if (bounded) await dispatch(bounded);
       } else await dispatch(req);
     })().catch(() => {
-      // Request bodies, URLs and thrown values may contain credentials; keep logs generic.
+      // 请求体、地址与抛出的值都可能带凭证：日志保持笼统。
       deps.log('本机接口处理失败');
       if (!res.headersSent) rejectRequest(res, 500, '接口暂时无法处理请求');
       else res.end();
@@ -112,6 +126,7 @@ export function startRouter(
   });
 }
 
+/** 写一段纯文本响应：固定关缓存与嗅探，避免页面内联脚本被当资源加载。 */
 function sendText(res: ServerResponse, status: number, type: string, body: string): void {
   res.writeHead(status, {
     'content-type': `${type}; charset=utf-8`,

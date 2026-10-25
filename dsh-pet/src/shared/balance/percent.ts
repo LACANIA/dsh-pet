@@ -1,25 +1,29 @@
-// 档位百分比与档位索引：宠物动画的驱动依据。
-//
-// 百分比本身按形态分派到各自的 handler（windows 取三窗口最大；money / points 按基准折算），
-// 这里只保留「入口 + 与服务商无关的档位切分」。
+/**
+ * 档位百分比入口与档位索引：宠物动画的驱动依据。
+ *
+ * 百分比口径按形态分派给各自的 handler（windows 取三窗口最大，money 与 points 按基准折算），
+ * 这里只保留入口与服务商无关的档位切分。
+ *
+ * @module dsh-pet/src/shared/balance/percent
+ */
 
 import { HANDLERS } from './handlers';
 import type { BalanceView } from './types';
 
 /**
- * 事件档位百分比（已用百分比语义：0 = 未消耗，100 = 耗尽）。具体口径见各 handler：
- * - windows：取三窗口最大（风险最高者为准）
- * - money：按各币种自己的 `fullBalance` 折算后叠加（不需要汇率）
- * - points：按 `points.full` 折算（同一单位内的比值）
- * 给不出百分比语义的形态 → undefined（不播档位动画，不替服务商猜一个）。
+ * 取已用百分比（0 = 未消耗，100 = 耗尽）；给不出百分比语义的形态返回 undefined，不替服务商猜一个。
+ *
+ * 具体口径见各 handler：windows 取三窗口最大，money 按各币种自己的基准折算后叠加（不需要汇率），
+ * points 按同一单位内的比值折算。
  */
 export function balancePercent(v: BalanceView): number | undefined {
   return HANDLERS[v.shape].percent(v);
 }
 
 /**
- * 余额事件档位索引（与 assets/config.jsonc 注释一致）：
- * index = p === 100 ? 5 : Math.floor(p / 20)
+ * 已用百分比对应的档位索引：20% 一档，仅恰好 100% 取最高档 5。
+ *
+ * 索引与成品配置里的余额档位动画一一对应。
  */
 export function balanceEventIndex(p: number): number {
   if (p === 100) return 5;

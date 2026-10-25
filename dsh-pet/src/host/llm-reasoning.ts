@@ -1,11 +1,11 @@
 /**
- * 当前模型是否支持 reasoning effort（含 "off"）的探测（host 半侧共用）。
+ * 探测当前模型是否支持 reasoning effort（含 "off"），宿主半侧共用。
  *
- * dsh-llm 对"模型无 reasoning 元数据 + 调用方显式传 effort"会直接判
- * UNSUPPORTED_REASONING_EFFORT（请求发不出去，被 adapter 折叠成空流，
- * 表现为"模型未返回文本"），因此只有在模型确实声明支持时才应传
- * reasoningEffort: 'off'；其余情况省略该字段（语义等价："off" 对无 reasoning
- * 元数据的模型本就等于"不传"）。
+ * 不负责缓存与重试：每次调用都向 dsh-llm 问一次，拿不到能力就保守当作不支持。
+ * 必须始终成立：只有模型确实声明支持时才传 reasoningEffort: 'off'——dsh-llm 对
+ * 「无 reasoning 元数据 + 显式传 effort」直接判 UNSUPPORTED_REASONING_EFFORT，请求发不出去，
+ * 只会被适配器折叠成空流，表现为「模型未返回文本」。
+ * @module dsh-pet/src/host/llm-reasoning
  */
 
 /** 可调用的 dsh-llm resolveModelInfo 能力的最小形状（防御式：不依赖完整类型） */

@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 /**
- * gen-types.mjs —— 用 tsc 声明导出生成 lib/types 下的类型声明（发布门禁 prepack 需要）。
+ * 用本地 tsc 生成 lib/types 下的类型声明，发布链的 prepack 门禁需要它。
  *
- * tsdown 的 dts 管线与双入口（client/host）不兼容（开启即构建失败），因此声明
- * 由 tsc 单独产出。布局与 package.json exports 的 types 路径一致：
- *   lib/types/index.d.ts          （宿主半侧，host 文件整体上移到根）
- *   lib/types/client/index.d.ts   （浏览器半侧）
- *
- * 用法：node scripts/gen-types.mjs（npm run types）
+ * tsdown 的 dts 管线与双入口（host/client）不兼容，开启即构建失败，所以声明单独产出。
+ * 目录布局必须与 package.json exports 的 types 路径一致：宿主半侧落在 lib/types/index.d.ts，
+ * 浏览器半侧落在 lib/types/client/index.d.ts。
+ * 只生成声明，不构建 JS、不做类型检查（typecheck 是另一条链）。
+ * @module dsh-pet/scripts/gen-types
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
@@ -22,12 +21,10 @@ const HOST_OUT = join(TYPES, 'host');
 rmSync(TYPES, { recursive: true, force: true });
 mkdirSync(TYPES, { recursive: true });
 
-// 直接调用本仓库的 tsc，不经过 npm/npx：
-// 旧写法是 `cmd /c npx tsc -p tsconfig.types.json`，它要求环境里存在 npm/npx
-// （纯 node / 只有 pnpm 的环境会失败），还额外背着一个 Windows 专用的 cmd /c 分支。
-// tsc 本来就在本地 node_modules 里，用当前 node 跑它即可 —— 跨平台一致、零外部命令依赖。
-// 解析走 createRequire：pnpm 的隔离布局下 typescript 只在 node_modules 里链了一次，
-// 用 require.resolve 比手拼路径更可靠。
+// 直接调用本仓库的 tsc，不经 npm/npx：只有 pnpm 或纯 node 的环境里没有 npx，
+// 也就不必为 Windows 额外保留 cmd /c 分支。
+// 解析走 createRequire：pnpm 的隔离布局下 typescript 在 node_modules 里只链一次，
+// require.resolve 比手拼路径可靠。
 const require = createRequire(import.meta.url);
 const tscEntry = require.resolve('typescript/lib/tsc.js');
 const tsc = spawnSync(process.execPath, [tscEntry, '-p', 'tsconfig.types.json'], {

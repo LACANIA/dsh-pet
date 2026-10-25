@@ -1,14 +1,13 @@
 /**
- * 桌面 Helper 进程管理器 —— 拉起/守护 Electron 透明窗口进程。
+ * 桌面 Helper 进程管理：解析 Electron 可执行文件、拉起 electron-helper/main.js、守护协议通道、
+ * 异常退出时按指数退避重启。不负责窗口内的渲染与业务判定（请求交给 bridgeHandler）。
  *
- * 架构：Helper 与宿主之间除了日志，还有一条 **stdin/stdout JSON 行协议**（bridge）：
- *   - 渲染端不再直接访问 DSH WebServer（DSH Desktop 2.0.3+ 的浏览器访问闸门会给插件自拉的
- *     独立进程裸 HTTP 请求回 403），改走自定义 scheme `dsh-pet-bridge://` → Electron 主进程
- *     （main.js 的 protocol.handle）→ 本模块的管道 → 宿主 handlePetRoute（与 HTTP 路由同一份逻辑）。
- *   - 协议行统一前缀 `dsh-pet-bridge:`，与普通日志行区分（main.js 的 console 输出也走 stdout）。
- *   - 素材（webm/字体/光标）不把二进制过管道：宿主返回文件绝对路径，main.js 自行读盘应答。
- * 本文件负责解析 Electron 可执行文件、以子进程方式拉起 electron-helper/main.js、
- * 守护协议通道、并在异常退出时自动重启。
+ * 与 Helper 之间除了日志还有一条 stdin/stdout 的 JSON 行协议：渲染端不直接访问 DSH WebServer
+ * （桌面版的浏览器访问闸门会给插件自拉的独立进程裸 HTTP 请求回 403），改走自定义 scheme → Electron
+ * 主进程 → 本模块 → 宿主路由（与 HTTP 路由同一份逻辑）。协议行带统一前缀，与普通日志行区分；素材
+ * 不过管道，只传绝对路径由 main.js 自行读盘。必须始终成立：同一时刻只有一个子进程，主动停止必须
+ * 走 stopAndWait，不能让新旧窗口重叠。
+ * @module dsh-pet/src/host/helper-process
  */
 
 import { spawn } from 'node:child_process';
@@ -18,15 +17,17 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 import type { LoggerLike } from './log-file';
-// `@electron/get` 只在**真的要下载** Electron 时才用到，因此按需动态加载（见 ensureElectronDownload）：
-// 静态 import 会把它连同 got/fs-extra 一串依赖钉进每个产物的启动路径，而独立应用模式下这条路径永远不执行。
+// `@electron/get` 只在真要下载 Electron 时才用到，故按需动态加载（见 ensureElectronDownload）：
+// 静态 import 会把它连同 got/fs-extra 一串依赖钉进每个产物的启动路径，而独立应用模式下这条路径不执行。
 
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
+/** 包根：模块所在目录的上一级（构建产物在 lib/，故等于插件根）。 */
 export const packageRoot = resolve(here, '..');
+/** 默认的 Helper 入口（runtime/electron-helper/main.js）。 */
 export const defaultHelperMain = resolve(packageRoot, 'runtime', 'electron-helper', 'main.js');
 
-/** 协议行前缀：stdout/stdin 里以此开头的整行 JSON 属于 bridge 协议，其余为日志 */
+/** 协议行前缀：stdout/stdin 里以此开头的整行 JSON 属于 bridge 协议，其余为日志。 */
 export const BRIDGE_PREFIX = 'dsh-pet-bridge:';
 
 /** 渲染端（经 main.js 转发）的一次请求：URL 是 /dsh-pet-7340/... 路径 + 查询串；
@@ -40,7 +41,7 @@ export interface BridgeRequest {
   cb?: string;
 }
 
-/** 宿主对一次请求的应答：json/text 走 body；素材走 file（文件绝对路径，main.js 自行读盘） */
+/** 宿主对一次请求的应答：json/text 走 body；素材走 file（文件绝对路径，main.js 自行读盘）。 */
 export interface BridgeResponse {
   id: number;
   status: number;
@@ -49,9 +50,10 @@ export interface BridgeResponse {
   file?: string;
 }
 
-/** bridge 请求处理器（宿主侧与 handlePetRoute 对接；main.js 不在收到请求时带出宿主动作） */
+/** bridge 请求处理器（宿主半侧与 handlePetRoute 对接；main.js 不在收到请求时带出宿主动作）。 */
 export type BridgeHandler = (req: BridgeRequest) => Promise<BridgeResponse>;
 
+/** 构造 HelperProcess 的选项；全部可选，缺省走 defaultLaunch 与 $DSH_HOME。 */
 interface HelperOptions {
   electronPath?: string;
   helperPath?: string;
@@ -64,6 +66,7 @@ interface HelperOptions {
   bridgeHandler?: BridgeHandler;
 }
 
+/** 最小日志接口（宿主传 console 或统一日志器）。 */
 type Logger = {
   info?: (...args: unknown[]) => void;
   warn?: (...args: unknown[]) => void;
@@ -71,7 +74,7 @@ type Logger = {
   debug?: (...args: unknown[]) => void;
 };
 
-/** Basic file validation only; this does not validate the binary format or launch a candidate. */
+/** 只做基本文件校验：不验证二进制格式，也不实际启动候选。 */
 function isNonEmptyFile(path: string): boolean {
   try {
     const stat = statSync(path);
@@ -82,13 +85,11 @@ function isNonEmptyFile(path: string): boolean {
 }
 
 /**
- * 解析 Electron 可执行文件。
- * 优先级：
- *   1. 显式候选（用户配置）/ DSH_PET_ELECTRON_PATH 环境变量
- *   2. 本机已安装的 electron npm 包（require('electron') 返回二进制路径）
- *   3. $DSH_HOME/electron（默认 ~/.dsh/electron）—— ensureElectronDownload 的落地路径
- *   4. 都不存在时由 ensureElectronDownload() 进程内异步下载（不 spawn 子进程，
- *      避免 process.execPath 在 Electron 宿主（如 DSH Desktop）里指向宿主 exe 导致崩溃）
+ * 解析 Electron 可执行文件，按优先级取第一个存在且非空的候选：显式候选与 DSH_PET_ELECTRON_PATH
+ * → 本机 electron npm 包 → $DSH_HOME/electron（下载落地路径）。
+ * 只认自己的落地路径，不再去 npm 全局目录 / Program Files / /usr/bin 探测别人装的 Electron。
+ * 都不存在时由 ensureElectronDownload() 在进程内异步下载（不 spawn 子进程，避免 process.execPath
+ * 在 Electron 宿主里指向宿主 exe 而崩溃）。
  */
 export function resolveElectronPath(candidates: Array<string | undefined> = []): string | undefined {
   const seen = new Set<string>();
@@ -112,21 +113,14 @@ export function resolveElectronPath(candidates: Array<string | undefined> = []):
   return list.find(isNonEmptyFile);
 }
 
-/** $DSH_HOME（默认 ~/.dsh），与 ensure-electron.mjs 的 HOME 计算一致。 */
 /**
  * 判断当前环境能否真的跑起 Electron 图形窗口。
  *
- * 【为什么需要】Linux 无显示环境（服务器 / 容器 / 纯 CLI）下，Electron 能被成功
- * 下载并 spawn 拉起，但初始化图形栈时立刻崩溃。配合 Helper 的守护循环
- * （异常退出自动重启），结果是每秒反复「拉起→崩溃→重启」，每个 core dump
- * 约 14MB —— 实测几小时可堆到数十 GB 打满磁盘。必须在拉起之前判断。
- *
- * 判定口径（只拦「明确跑不起来」的情况）：
- *   - win32 / darwin：桌面系统，放行（macOS 无 DISPLAY 也走 WindowServer）；
- *   - linux：需要 DISPLAY 或 WAYLAND_DISPLAY 其一，都没有则判为无显示环境。
- *
- * 【逃生口】DSH_PET_DESKTOP_FORCE=1 强制跳过，供 Xvfb / 远程桌面等
- * 「环境变量没设但其实能显示」的场景使用。
+ * Linux 无显示环境（服务器 / 容器 / 纯 CLI）下 Electron 能被下载并 spawn，却在初始化图形栈时崩溃；
+ * 配合守护循环就变成每秒「拉起 → 崩溃 → 重启」，每个 core dump 约 14MB，几小时能堆到数十 GB 打满
+ * 磁盘，所以必须在拉起之前判断。只拦「明确跑不起来」的：win32 / darwin 放行（macOS 无 DISPLAY 也走
+ * WindowServer），linux 需要 DISPLAY 或 WAYLAND_DISPLAY 其一。逃生口 DSH_PET_DESKTOP_FORCE=1 强制
+ * 跳过，供 Xvfb / 远程桌面等「环境变量没设但其实能显示」的场景使用。
  */
 export function hasGraphicalDisplay(): boolean {
   if (process.platform !== 'linux') return true;
@@ -134,19 +128,19 @@ export function hasGraphicalDisplay(): boolean {
   return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 }
 
+/** $DSH_HOME（默认 ~/.dsh）；测试与独立模式共用这一处推导。 */
 export function dshHomeDir(): string {
   const userProfile = process.env.USERPROFILE || process.env.HOME || '';
   return process.env.DSH_HOME || join(userProfile, '.dsh');
 }
 
-// ---------- 平台适配（win32 / darwin / linux）----------
-// Electron 官方发布包按平台/架构不同：win32 解压出 electron.exe + 散文件；
-// darwin 解压出 Electron.app（可执行文件在 Contents/MacOS/Electron）；linux 是 electron 单文件。
+// Electron 官方发布包按平台/架构不同：win32 解压出 electron.exe + 散文件，darwin 是 Electron.app
+// （可执行文件在 Contents/MacOS/Electron），linux 是 electron 单文件。
 
-/** 当前平台标识（win32 / darwin / linux） */
+/** 当前平台标识（win32 / darwin / linux）。 */
 const PLAT = process.platform;
 
-/** $DSH_HOME/electron 落地目录下，可执行文件的相对路径（按平台） */
+/** $DSH_HOME/electron 落地目录下，可执行文件的相对路径（按平台）。 */
 const ELECTRON_REL =
   PLAT === 'win32'
     ? 'electron.exe'
@@ -155,12 +149,9 @@ const ELECTRON_REL =
       : 'electron';
 
 /**
- * Electron 运行时落地目录（$DSH_HOME/electron）—— 下载解压的目标，
- * 也是设置页「卸载与存储」里让用户清理的那个目录。
- *
- * 唯一定义处：解析（resolveElectronPath / defaultElectronExe）与下载
- * （ensureElectronDownload）全部走这里，避免同一个目录字面量在多个模块各写一遍，
- * 改了一处而另一处没改（设置页就会显示一个永远不存在的路径）。
+ * Electron 运行时落地目录（$DSH_HOME/electron）—— 下载解压的目标，也是设置页「卸载与存储」里让
+ * 用户清理的那个目录。解析（resolveElectronPath / defaultElectronExe）与下载都必须走这里：同一个
+ * 目录字面量在别处再写一遍，改了一处另一处没改，设置页就会显示一个永远不存在的路径。
  */
 export function electronLandingDir(): string {
   return join(dshHomeDir(), 'electron');
@@ -171,6 +162,7 @@ export function defaultElectronExe(): string {
   return join(electronLandingDir(), ELECTRON_REL);
 }
 
+/** 进程内下载 Electron 的选项。 */
 export interface EnsureElectronOptions {
   /** Electron 版本号（默认 43.3.0，可被 DSH_PET_ELECTRON_VERSION 覆盖）。 */
   version?: string;
@@ -179,19 +171,15 @@ export interface EnsureElectronOptions {
   /** 单次下载超时（默认 10 分钟）。 */
   timeoutMs?: number;
   /**
-   * 面向用户的日志出口（进桌宠工作气泡）。
-   * **与 console 分开**：console 留英文原文给终端 / CLI 排障，这里产出给「没有控制台的
-   * DSH 桌面版用户」看的一句短话。宿主负责截断与投递，本函数只产出文本——它不认识 state。
+   * 面向用户的日志出口（进桌宠工作气泡）。与 console 分开：console 留英文原文给终端 / CLI 排障，
+   * 这里产出给「没有控制台的 DSH 桌面版用户」看的一句短话。本函数只产出文本，不认识 state。
    */
   onLog?: (event: ElectronDownloadLog) => void;
-  /**
-   * 落盘日志出口（宿主注入的统一日志器，见 ./log-file）。
-   * 不传则退回 console：CLI / 单测里仍能直接在终端看到。
-   */
+  /** 落盘日志出口（宿主注入的统一日志器，见 ./log-file）；不传则退回 console。 */
   logger?: LoggerLike;
 }
 
-/** 一条下载日志：`text` 给用户看；`level='warn'` = 失败路径；`done` = 本次下载已收尾（成功或失败） */
+/** 一条下载日志：`text` 给用户看；`level='warn'` = 失败路径；`done` = 本次下载已收尾（成功或失败）。 */
 export interface ElectronDownloadLog {
   text: string;
   level: 'info' | 'warn';
@@ -200,9 +188,9 @@ export interface ElectronDownloadLog {
 
 /**
  * 进程内下载并解压 Electron 到 $DSH_HOME/electron。
- * 不 spawn 子进程：在 CLI node 与 Electron 宿主（DSH Desktop）里都可用，
- * 修复原 ensure-electron.mjs 用 process.execPath 调脚本导致宿主重复拉起的问题。
- * 已存在则原样返回；失败返回 undefined（不影响 DSH 与浏览器 overlay）。
+ *
+ * 不 spawn 子进程：CLI node 与 Electron 宿主（DSH Desktop）里都可用，也避开了 process.execPath 在
+ * 宿主里指向宿主 exe 而崩溃。已存在则原样返回；失败返回 undefined（不影响 DSH 与浏览器 overlay）。
  */
 export async function ensureElectronDownload(options: EnsureElectronOptions = {}): Promise<string | undefined> {
   const version = options.version || process.env.DSH_PET_ELECTRON_VERSION || '43.3.0';
@@ -212,8 +200,8 @@ export async function ensureElectronDownload(options: EnsureElectronOptions = {}
   const exe = defaultElectronExe();
   if (isNonEmptyFile(exe)) return exe;
 
-  // 下载日志默认走 console；宿主会把它自己的统一日志器传进来——桌面版没有控制台，
-  // console 直出等于丢失（ctx.logger 在部分宿主也不映射到终端，见 issue #168 的教训）。
+  // 下载日志默认走 console；宿主会把它自己的统一日志器传进来——桌面版没有控制台，console 直出
+  // 等于丢失（ctx.logger 在部分宿主也不映射到终端）。
   const sink = options.logger ?? console;
   const log = (message: string): void => sink.info?.(`[dsh-pet] ${message}`);
   const warn = (message: string): void => sink.warn?.(`[dsh-pet] ${message}`);
@@ -271,16 +259,10 @@ export async function ensureElectronDownload(options: EnsureElectronOptions = {}
       });
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       info(`download complete (${seconds}s), extracting to ${targetDir} ...`, `下载完成（${seconds}s），正在解压`);
-      // 官方 @electron-internal/extract-zip 解压（electron 43 官方安装同款）：
-      // 纯 Node + native binding，跨平台一致，正确处理 symlink 与文件权限，
-      // 不需要系统 unzip/tar/powershell，也没有我们手写的平台适配链。
-      //
-      // 为什么用**动态 import**而不是顶层静态 import：该包是 N-API 原生模块，预编译产物只覆盖
-      // 官方列出的 11 个 target，**没有 Android**（Termux 是 aarch64-linux-android / Bionic，
-      // 与列表里的 linux-gnu / linux-musl 都不是一回事）。静态 import 会在模块求值期就执行
-      // binding.js 顶层的 `if (!nativeBinding) throw`，于是**只想用 Web 模式**的用户也会因为
-      // 「插件入口加载失败」而整个 entry 激活失败（同类故障见 issue #80）。改成按需加载后，
-      // 这条路径只在真要解压时才走，失败也落进本函数的 catch → 降级到浏览器宠物。
+      // 解压用官方 extract-zip（electron 43 官方安装同款）：纯 Node + native binding，跨平台一致，
+      // 正确处理 symlink 与文件权限，不需要系统 unzip/tar/powershell。
+      // 必须动态 import：该包是 N-API 原生模块，预编译产物没有 Android target，静态 import 会在模块
+      // 求值期就 throw，让只想用 Web 模式的用户整个 entry 激活失败；按需加载后失败只落进本函数 catch。
       const { default: extract } = await import('@electron-internal/extract-zip');
       await extract(zipPath, { dir: targetDir });
       if (!isNonEmptyFile(exe)) {
@@ -300,6 +282,10 @@ export async function ensureElectronDownload(options: EnsureElectronOptions = {}
   }
 }
 
+/**
+ * 默认启动方式：Electron 可执行文件 + Helper 入口脚本。
+ * @throws Electron 解析不到时抛错（调用方据此降级到浏览器宠物）。
+ */
 export function defaultLaunch(options: HelperOptions = {}): { command: string; args: string[] } {
   const electronPath = resolveElectronPath([options.electronPath]);
   if (!electronPath) {
@@ -309,23 +295,19 @@ export function defaultLaunch(options: HelperOptions = {}): { command: string; a
   return { command: electronPath, args: [helperPath] };
 }
 
-/** 停止 helper 的等待上限（ms）：超过就升级 SIGKILL（issue #64） */
+/** 停止 helper 的等待上限（ms）：超过就升级 SIGKILL。 */
 export const HELPER_STOP_TIMEOUT_MS = 3000;
-/** SIGKILL 之后还给进程多久退出（ms）；到点仍未退出就放弃等待，绝不无限挂住调用方 */
+/** SIGKILL 之后还给进程多久退出（ms）；到点仍未退出就放弃等待，绝不无限挂住调用方。 */
 export const HELPER_STOP_GRACE_MS = 1000;
 
 /**
  * spawn helper 用的环境变量（纯函数，可独立测试）。
  *
- * **必须删掉 `ELECTRON_RUN_AS_NODE`**（issue #63）：宿主自己可能就是个 Electron 应用（DSH Desktop），
- * 它的 `process.env` 里可能带着这个变量；原样透传会让我们 spawn 的 Electron 以**纯 Node 模式**启动——
- * 内置 `electron` 模块根本不注册，main.js 顶部 `require('electron')` 直接 MODULE_NOT_FOUND →
- * helper 崩 → 守护循环重启 → 12 次熔断 → 桌面模式彻底不再出现，且没有任何用户可见提示。
- *
- * 为什么是"删除"而不是设成空串：Electron 只看这个变量**存不存在**。实测 Electron 43.3.0（Windows，
- * 与插件用的是同一份二进制）：删除 → `process.type=browser`、`require('electron')` 正常拿到 app；
- * 设 `''` → 直接 abort（exit 134，`node::CreateEnvironment` 断言失败）；设 `'0'`/`'false'`/`'1'` →
- * 都进纯 Node 模式。运行期再 `delete process.env` 已经晚了（模块加载器在进程启动瞬间就定了）。
+ * 必须删掉 `ELECTRON_RUN_AS_NODE`：宿主自己可能就是个 Electron 应用（DSH Desktop），它的 env 里可能
+ * 带着这个变量，原样透传会让子进程以纯 Node 模式启动——`require('electron')` 直接 MODULE_NOT_FOUND，
+ * helper 崩、守护循环重启、最终熔断，桌面模式彻底不再出现，且没有任何用户可见提示。
+ * 为什么是删除而不是置空：Electron 只看这个变量存不存在，实测置 `''` 直接 abort（exit 134），置
+ * `'0'` / `'false'` / `'1'` 都进纯 Node 模式；运行期再 delete 已经晚了，模块加载器在进程启动时就定了。
  */
 export function helperSpawnEnv(hostPid: number, extra?: Record<string, string | undefined>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, DSH_PET_HOST_PID: String(hostPid), ...extra };
@@ -333,6 +315,7 @@ export function helperSpawnEnv(hostPid: number, extra?: Record<string, string | 
   return env;
 }
 
+/** 一个 Helper 子进程的生命周期：启动、协议读写、停止、崩溃重启。 */
 export class HelperProcess {
   declare readonly options: HelperOptions;
   declare readonly logger: Logger;
@@ -357,6 +340,7 @@ export class HelperProcess {
     this.stdoutBuffer = '';
   }
 
+  /** 拉起子进程；已有子进程在跑或正在停止时直接返回现有句柄。 */
   start(): import('node:child_process').ChildProcess | undefined {
     if (this.child || this.stopping) return this.child;
     this.lastStartAt = Date.now();
@@ -367,21 +351,17 @@ export class HelperProcess {
     const command = launch.command;
     const args = this.options.args || launch.args;
 
-    // issue #88：cwd 必须落在包目录之外 —— Windows 不允许重命名/删除活进程的当前目录，
-    // 否则 pnpm 无法 rename 覆盖 node_modules/dsh-pet。助手侧资源解析与 CWD 无关，故用 $DSH_HOME。
+    // cwd 必须落在包目录之外：Windows 不允许重命名或删除活进程的当前目录，否则 pnpm 无法 rename
+    // 覆盖 node_modules/dsh-pet。Helper 侧资源解析与 CWD 无关，故用 $DSH_HOME。
     const cwd = this.options.cwd || dshHomeDir();
     mkdirSync(cwd, { recursive: true }); // spawn 的 cwd 不存在会直接 ENOENT
     const child = spawn(command, args, {
       cwd,
-      // DSH_PET_HOST_PID：把**宿主自己的** pid 交给 helper，让它能判断"宿主还在不在"
-      // （helper 侧 host-liveness.js 每 2s kill(pid, 0) 一次；ESRCH 就自行退出，见 issue #56）。
-      // 放在唯一的 spawn 点，所有调用方（含自定义 command）自动获得。
-      // 为什么 macOS/Linux 非有不可：Windows 上 Node/libuv 会把子进程放进带
-      // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 的 job 对象，宿主一退出内核就顺手杀掉它——实测
-      // helper 的心跳正好停在宿主退出的那一刻、连 process.on('exit') 都不触发；POSIX 没有这层
-      // 兜底，宿主非正常退出后 helper 会一直留着（issue #56 报告的就是这个）。
-      // 环境变量统一经 helperSpawnEnv 构造：它会删掉会劫持 Electron 启动模式的 ELECTRON_RUN_AS_NODE
-      // （issue #63，详见该函数注释）。
+      // DSH_PET_HOST_PID：把宿主自己的 pid 交给 helper，让它能判断「宿主还在不在」（helper 侧每 2s
+      // kill(pid, 0) 一次，ESRCH 就自行退出）。放在唯一的 spawn 点，所有调用方都能拿到。
+      // macOS/Linux 非有不可：Windows 上 libuv 会把子进程放进带 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      // 的 job 对象，宿主一退出内核就顺手杀掉；POSIX 没有这层兜底，helper 会一直留着。
+      // 环境变量统一经 helperSpawnEnv 构造：它会删掉会劫持 Electron 启动模式的 ELECTRON_RUN_AS_NODE。
       env: helperSpawnEnv(process.pid, this.options.env),
       stdio: ['pipe', 'pipe', 'pipe'], // stdin 也要：bridge 协议响应回写（main.js 请求经 stdout 上来）
       windowsHide: true,
@@ -389,9 +369,8 @@ export class HelperProcess {
     this.child = child;
     child.once('error', (error) => {
       this.logger.error?.(`dsh-pet desktop helper failed to start: ${error.message}`);
-      // Failed spawn (ENOENT/EACCES) emits error, but no exit. Do not leave
-      // a non-running child blocking every later start. Errors from a live
-      // process (for example a failed kill) must still wait for its exit.
+      // spawn 失败（ENOENT / EACCES）只发 error 不发 exit：不能留一个没跑起来的子进程挡住之后每次
+      // start；而活着的进程报错（例如 kill 失败）必须继续等它的 exit。
       if (child.pid === undefined && this.child === child) {
         this.child = undefined;
         this.scheduleRestart();
@@ -420,7 +399,7 @@ export class HelperProcess {
     return child;
   }
 
-  /** stdout 按行缓冲：`dsh-pet-bridge:` 前缀整行 = 协议请求，其余 = 日志行 */
+  /** stdout 按行缓冲：`dsh-pet-bridge:` 前缀整行 = 协议请求，其余 = 日志行。 */
   private onStdoutChunk(chunk: string): void {
     this.stdoutBuffer += chunk;
     let nl: number;
@@ -464,7 +443,7 @@ export class HelperProcess {
     }
   }
 
-  /** 把应答发回 main.js：优先 POST 到请求行携带的 cb（本地回调服务器）；无 cb 时回写 stdin（低版本兼容） */
+  /** 把应答发回 main.js：优先 POST 到请求行携带的 cb（本地回调服务器）；无 cb 时回写 stdin（低版本兼容）。 */
   private sendBridgeResponse(req: BridgeRequest, resp: BridgeResponse): void {
     const cb = typeof req.cb === 'string' && /^https?:[/][/]/.test(req.cb) ? req.cb : '';
     if (cb) {
@@ -486,9 +465,9 @@ export class HelperProcess {
     }
   }
 
-  /** 停止 helper：发 SIGTERM 即返回，**不等它退出**。宿主退出/插件卸载路径用它——
-   *  宿主马上就没了（Windows 有 job 对象、POSIX 有 helper 自己的 host-liveness 兜底，见 issue #56）。
-   *  **停止后要立刻重启的场景必须用 stopAndWait()**，否则新旧进程会短暂重叠（issue #64）。 */
+  /** 停止 helper：发 SIGTERM 即返回，不等它退出。宿主退出 / 插件卸载路径用它——宿主马上就没了
+   *  （Windows 有 job 对象、POSIX 有 helper 自己的 host-liveness 兜底）。
+   *  停止后要立刻重启的场景必须用 stopAndWait()，否则新旧进程会短暂重叠。 */
   stop(reason = 'plugin-disposed'): void {
     this.stopping = true;
     if (this.restartTimer) clearTimeout(this.restartTimer);
@@ -500,13 +479,11 @@ export class HelperProcess {
   }
 
   /**
-   * 停止 helper 并**等它真正退出**（issue #64）：原实现只发一次 SIGTERM 就返回、紧接着 spawn 新进程，
-   * 而 Electron 收到 SIGTERM 后关窗、销毁 GPU/动画合成器是异步的（几百 ms 起）——旧窗口（旧大小）
-   * 还没消失、新窗口（新大小）已经画出来，桌面上就短暂出现"两只宠物"。
-   *   ① 先置 `stopping`（由 stop() 完成）：守护逻辑不得把这次主动停止误判成崩溃去自动重启；
-   *   ② 只等 `exit`，**不等 `close`**：stdio 管道关闭远早于进程真正退出（实测 SIGTERM 后 ~10ms 就触发）；
-   *   ③ 超时（默认 3s）升级 SIGKILL；SIGKILL 后再给 1s 宽限，仍未退出就放弃等待——
-   *      配置保存绝不能因为一个退不掉的子进程而被无限挂住。
+   * 停止 helper 并等它真正退出：只发一次 SIGTERM 就 spawn 新进程是不行的——Electron 收到 SIGTERM 后
+   * 关窗、销毁 GPU/动画合成器是异步的（几百 ms 起），旧窗口（旧大小）还没消失、新窗口已经画出来，
+   * 桌面上会短暂出现「两只宠物」。所以：① 先置 `stopping`（由 stop() 完成），守护逻辑不得把这次主动
+   * 停止误判成崩溃去自动重启；② 只等 `exit` 不等 `close`——stdio 管道关闭远早于进程真正退出；③ 超时
+   * （默认 3s）升级 SIGKILL，再给 1s 宽限，仍未退出就放弃等待，配置保存绝不能被无限挂住。
    */
   async stopAndWait(reason = 'plugin-disposed', timeoutMs = HELPER_STOP_TIMEOUT_MS): Promise<void> {
     this.stop(reason);
@@ -524,9 +501,8 @@ export class HelperProcess {
 
   private scheduleRestart(): void {
     if (this.restartTimer || this.stopping) return;
-    // ① 指数退避：750ms 起 2x 封顶 30s；② 熔断：连续崩溃 12 次（约 3 分钟）后停止重启。
-    // 两个阈值都可配（DSH_PET_RESTART_BASE_MS / DSH_PET_RESTART_MAX_FAILURES），稳定运行 ≥3 分钟清零。
-    // 纯逻辑（restartBackoffDelayMs / shouldCircuitBreak / helperRunIsStable）在 helper-process.test.ts 有独立用例。
+    // 指数退避（750ms 起 2x，封顶 30s）+ 熔断（连续崩溃 12 次约 3 分钟后停止重启）；两个阈值都可配
+    // （DSH_PET_RESTART_BASE_MS / DSH_PET_RESTART_MAX_FAILURES），稳定运行 ≥3 分钟清零。
     if (helperRunIsStable(Date.now() - this.lastStartAt)) {
       this.restartFailures = 0;
     } else {
@@ -540,8 +516,7 @@ export class HelperProcess {
       return;
     }
     const base = this.resolveRestartBaseMs();
-    // 首次崩溃等 base（= 750ms 默认），与旧版固定首延和 restartBackoffDelayMs 的 0 起序列一致：
-    // 计数是"已经崩了几次"（1 起），延迟要按"第几次重试"（0 起）取，故减 1
+    // 计数是「已经崩了几次」（1 起），延迟要按「第几次重试」（0 起）取，故减 1：首次崩溃等 base。
     const delay = restartBackoffDelayMs(this.restartFailures - 1, base);
     this.logger.warn?.(
       `dsh-pet desktop helper exited; restarting in ${Math.round(delay)}ms ` +
@@ -566,11 +541,9 @@ export class HelperProcess {
 }
 
 /**
- * 等子进程真正退出（issue #64 的"停止要等干净"那一步）：
- *   - 已经退出（exitCode/signalCode 有值）→ 立即 resolve，不挂监听；
- *   - 只等 `exit`：`close` 只代表 stdio 管道关闭，远早于进程真正退出；
- *   - 到 timeoutMs 调 onTimeout()（调用方升级 SIGKILL），再给 HELPER_STOP_GRACE_MS 宽限；
- *   - 宽限到点仍未退出就 resolve——调用方（配置保存触发的重启）绝不能被无限挂住。
+ * 等子进程真正退出：已经退出（exitCode / signalCode 有值）→ 立即 resolve，不挂监听；只等 `exit`，
+ * `close` 只代表 stdio 管道关闭，远早于进程真正退出；到 timeoutMs 调 onTimeout()（调用方升级
+ * SIGKILL），再给 HELPER_STOP_GRACE_MS 宽限；宽限到点仍未退出就 resolve——调用方绝不能被无限挂住。
  */
 function waitForChildExit(
   child: import('node:child_process').ChildProcess,
@@ -596,14 +569,12 @@ function waitForChildExit(
   });
 }
 
-// ---------- 重启退避 / 熔断纯逻辑（可独立测试，不依赖 spawn） ----------
-
 /** 稳定运行判定阈值：Helper 连续无崩溃运行 ≥ 3 分钟后，重启失败计数清零。 */
 export const HELPER_STABLE_MS = 3 * 60 * 1000;
 
 /**
  * 指数退避：第 n 次（0 起）失败后等待 base × 2ⁿ，封顶 30s。
- * 默认 base 750ms 保持与旧版首延一致，序列：750 → 1500 → 3000 → … → 30000。
+ * 默认 base 750ms，序列 750 → 1500 → 3000 → … → 30000。
  */
 export function restartBackoffDelayMs(consecutiveFailures: number, baseMs = 750): number {
   const MAX = 30_000;

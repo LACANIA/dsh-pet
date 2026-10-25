@@ -1,7 +1,10 @@
-// 余额气泡（client 半侧）：展示当前服务商余额/用量。哑组件——数据由上层传入，
-// 自身不发起请求；工厂形态与 pet.ts 一致（react 由 DSH 运行时注入）。
-// 内容（文案/档位/数学）来自 src/shared/balance.ts 的 balanceBubbleView ——
-// 与桌面模式共用同一份行数据，本文件只负责把行数据映射成 React 节点。
+/**
+ * 浏览器半侧的余额与碎碎念气泡：哑组件，只把 shared 的行数据或节点树映射成 React 节点。
+ * 不发起请求，显隐与停留时长由 pet.ts 控制。
+ * 依赖运行时注入的 react 与 shared 的 balance / whisper 视图。
+ * 必须始终成立：样式与桌面端同源，文案与档位由 shared 计算。
+ * @module dsh-pet/src/client/bubble
+ */
 import {
   balanceBubbleView,
   balanceDetailView,
@@ -22,30 +25,19 @@ import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import type * as ReactNS from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
-/** 气泡内联样式：白色半透明圆润泡 + 底部小尾巴指向宠物；字体用上首软糖体（本地打包，稳定）。
- * 尺寸分两类锚点：
- *  - 气泡**盒子**（宽上下限/内边距/圆角/尾巴/阴影/行间距/角标）锚在字号 `--f` 上（em 语义）：
- *    字号调大盒子同步变大，文字永远装得下——不再出现「字长大了、框没长」把文字顶出白底；
- *  - 气泡**位置**（bottom 偏移）仍锚在 `--dsh-pet-size`，保证气泡始终贴在宠物头顶同一点。
- * 系数 = 原系数 ÷ 0.0455（原字号系数），故默认 462px 宠物 / 21px 字号下与改造前逐像素一致：
- * ×0.0455 → 1em、最小宽 0.26 → 5.7143、最大宽 0.5 → 10.989 等。
- * 字号：正文取 --dsh-pet-font-bubble（两端按该宠物尺寸算好注入，见 shared/fonts.ts 的 resolveFontPx）；
- * 气泡内其余层级按「相对正文的比例」派生——故统一先定义局部变量 --f = 正文最终字号，
- * 子元素经自定义属性继承取用；变量未注入时 --f 回退到原表达式，行为与改造前逐像素一致。
- * 换行：正文不锁 nowrap，折行只在内容真的超过宽度上限时才发生（见下一条）。
- * 宽度为什么必须写 width:max-content：气泡是 left:50% 的绝对定位盒，它的「可用宽度」只有包含块的一半
- * （= 宠物宽度的一半），shrink-to-fit 会先被这道墙卡死——max-width 调多大都不生效，字号一大就折行/顶出。
- * 写 width:max-content 后盒子先按内容取宽，再由 max-width 收口（= min(字号口径上限, 包含块 100%)），
- * 「字变大 → 框变宽」才真正生效，且永不超过宠物本身宽度（桌面窗口只比宠物大一圈，超了会被裁）。
- * 断词用 break-word 而非 anywhere：只在整词放不下时才断，不会把 85% / ¥12.34 这类数字拆到两行。 */
+/** 气泡内联样式：白色半透明圆泡加底部小尾巴，盒子尺寸锚字号 `--f`，位置锚宠物尺寸。
+ *  width:max-content 不可省：left:50% 的绝对定位盒可用宽度只有包含块一半，shrink-to-fit
+ *  会先被卡死；先按内容取宽，再由 max-width 收口。box-sizing 钉死 content-box，避免宿主
+ *  全局 border-box 把内边距算进宽度；断词用 break-word，数字与单位不会被拆行。
+ */
 const bubbleCss = [
-  // 本地字体：/dsh-pet-7340/font/ 由 host 从 assets/fonts 提供；font-display swap 先回退后切换
+  // 本地字体：由 host 从 assets/fonts 提供；font-display:swap 先回退后切换。
   '@font-face{font-family:"ShangshouSoftCandy";src:url("/dsh-pet-7340/font/上首软糖体.ttf") format("truetype");font-display:swap;font-weight:400}',
   '.dsh-pet-bubble{position:absolute;left:50%;transform:translateX(-50%);' +
     'bottom:calc(100% - var(--dsh-pet-size)*0.108);' +
     'width:max-content;min-width:calc(var(--f)*5.7143);max-width:min(calc(var(--f)*16),100%);' +
-    // 钉死 content-box：宿主页面可能全局设了 border-box，那会让 min/max-width 把内边距也算进去，
-    // 内容可用宽度被悄悄缩掉一圈（表现为「明明还有空位却折行」）。桌面端 index.html 同样钉死，两端一致。
+    // 钉死 content-box：宿主可能全局设了 border-box，让 min/max-width 把内边距算进去，
+    // 表现为「明明还有空位却折行」；桌面端同样钉死，两端一致。
     'box-sizing:content-box;' +
     'padding:calc(var(--f)*0.4835) calc(var(--f)*0.6593);' +
     'border-radius:calc(var(--f)*0.7692);' +
@@ -56,39 +48,34 @@ const bubbleCss = [
     'box-shadow:0 calc(var(--f)*0.1978) calc(var(--f)*0.7692) rgba(0,0,0,.14),0 1px 3px rgba(0,0,0,.08);' +
     'backdrop-filter:blur(6px);opacity:0;transition:opacity .25s ease;' +
     'white-space:normal;overflow-wrap:break-word}',
-  // 底部尾巴：小三角指向下方宠物（尺寸锚字号，与盒子同步）
+  // 底部尾巴：小三角指向下方宠物，尺寸锚字号。
   '.dsh-pet-bubble::after{content:"";position:absolute;left:50%;bottom:calc(var(--f)*-0.3736);' +
     'transform:translateX(-50%);border:calc(var(--f)*0.3736) solid transparent;' +
     'border-top-color:rgba(255,255,255,.92);border-bottom:none}',
   '.dsh-pet-bubble.is-on{opacity:1}',
-  // 碎碎念变体：字号缩到余额气泡的 0.75（0.0455→0.034，即 ×0.7473）、宽度下限更窄（0.10 → 2.1978），
-  // 上限与余额气泡相同；宽度取宽/折行的规则同 .dsh-pet-bubble（继承 width:max-content）
+  // 碎碎念变体：字号缩到余额气泡的 0.75，宽度下限更窄，上限与折行规则相同。
   '.dsh-pet-bubble.dsh-pet-whisper{font-size:calc(var(--f)*0.7473);' +
     'min-width:calc(var(--f)*2.1978);max-width:min(calc(var(--f)*10.989),100%)}',
-  // 配图（碎碎念/对话共用）：样式在 shared 的 MEME_BUBBLE_CSS（两端同一份，由
-  // createMemeImage 注入）——这里不再重复写一份，避免与桌面端 index.html 走样
+  // 配图样式在 shared 的 MEME_BUBBLE_CSS，这里只保留标题与行样式。
   '.dsh-pet-bubble .pet-bub-title{font-size:calc(var(--f)*0.7692);color:rgba(43,43,43,.6);margin-bottom:calc(var(--f)*0.1978)}',
   '.dsh-pet-bubble .pet-bub-row{display:flex;justify-content:space-between;gap:calc(var(--f)*0.6593);flex-wrap:wrap}',
-  // 档位行由多个片段拼成（「余额（」+「峰」+「）¥8.79/$2.40」）：只允许在片段之间换行，
-  // 片段内部不拆字（否则宽度不够时会出现一个字一行的竖排）
+  // 档位行由多个片段拼成：只在片段之间换行，片段内部不拆字，避免竖排。
   '.dsh-pet-bubble .pet-bub-row>span{white-space:nowrap}',
   '.dsh-pet-bubble .pet-bub-sub{font-size:calc(var(--f)*0.7692);color:rgba(43,43,43,.6)}',
   '.dsh-pet-bubble .pet-bub-val{font-variant-numeric:tabular-nums;font-weight:650;color:#1f1f1f}',
   '.dsh-pet-bubble .pet-bub-err{color:#d94f3d;font-size:calc(var(--f)*0.7692)}',
   '.dsh-pet-bubble .pet-bub-tag{margin-left:calc(var(--f)*0.2857);font-size:calc(var(--f)*0.4835);color:rgba(43,43,43,.55);border:1px solid rgba(43,43,43,.25);' +
     'border-radius:calc(var(--f)*0.2857);padding:0 calc(var(--f)*0.1978);vertical-align:1px}',
-  // 峰/谷计价档位标注：峰红、谷绿
+  // 峰/谷计价档位：峰红、谷绿。
   '.dsh-pet-bubble .pet-bub-tier{font-weight:700}',
   '.dsh-pet-bubble .pet-bub-tier-peak{color:#e53935}',
   '.dsh-pet-bubble .pet-bub-tier-idle{color:#2e9e4f}',
-  // ---- 展开态（点余额气泡后的完整额度）：每窗口一行，进度条长度 = 已用百分比 ----
-  // 可点：气泡默认 pointer-events:none（不挡宿主页面），只有这张可展开的余额气泡才开命中
+  // 展开态：每个窗口一行，进度条长度等于已用百分比。
+  // 气泡默认不挡宿主页面，只有可展开的余额气泡才开命中。
   '.dsh-pet-bubble.is-clickable{pointer-events:auto;cursor:pointer}',
-  // 收起态宽度上限 10.989em 排不下「窗口名 + 条 + 百分比 + 重置」四列，展开态单独给一档更宽的：
-  // 21em（60% 字号下 ≈265px），仍以包含块 100% 收口。
-  // 整体缩到收起字号的 60%：--f 是盒内所有尺寸的锚点（字号/内边距/圆角/进度条高度全都跟着它缩）。
+  // 收起态排不下「窗口名 + 条 + 百分比 + 重置」四列，展开态单独加宽并缩到 60% 字号。
   '.dsh-pet-bubble.is-expanded{--f:calc(var(--f0)*0.6);width:min(calc(var(--f)*21),100%);max-width:100%}',
-  // 淡出：换内容前先降到透明（.25s，复用 opacity 那条过渡曲线），换完去掉这个类再淡入
+  // 淡出：换内容前先透明，换完去掉这个类再淡入。
   '.dsh-pet-bubble.is-on.is-fading{opacity:0}',
   '.dsh-pet-bubble .pet-bub-quota{display:flex;align-items:center;gap:calc(var(--f)*0.4);margin:calc(var(--f)*0.13) 0}',
   '.dsh-pet-bubble .pet-bub-quota-label{flex:none;min-width:calc(var(--f)*1.9);font-size:calc(var(--f)*0.7692);color:rgba(43,43,43,.6)}',
@@ -100,7 +87,7 @@ const bubbleCss = [
   '.dsh-pet-bubble .pet-bub-quota-reset{flex:none;min-width:calc(var(--f)*2.6);text-align:right;font-size:calc(var(--f)*0.7692);color:rgba(43,43,43,.6)}',
 ].join('\n');
 
-/** 只注入一次 */
+/** 注入气泡样式，每页只注入一次。 */
 function injectBubbleCss(): void {
   if (typeof document !== 'undefined' && document.querySelector('style[data-plugin-css="dsh-pet/bubble"]') === null) {
     const tag = document.createElement('style');
@@ -111,14 +98,14 @@ function injectBubbleCss(): void {
   }
 }
 
-/** 行数据 → React 节点（shared 视图的薄壳） */
+/** 把余额行数据映射成 React 节点。 */
 function rowsToNodes(h: typeof jsx, rows: BalanceBubbleRow[]): ReactNode {
-  // 含档位段（deepseek 余额单行）：同一行内联渲染，峰/谷着色
+  // 含档位段时同一行内联渲染，峰/谷着色。
   if (rows.some((r) => r.role === 'tier')) {
     return h('div', {
       className: 'pet-bub-row',
       children: rows.map((r, i) => {
-        // 进度条行不会与档位段同现（档位段只属于 money 形态，quota 只属于 windows 展开态）
+        // 进度条行不会与档位段同现。
         if (r.role === 'quota') return null;
         if (r.role === 'tier') {
           return h('span', {
@@ -131,10 +118,9 @@ function rowsToNodes(h: typeof jsx, rows: BalanceBubbleRow[]): ReactNode {
       }),
     });
   }
-  // 其余：每行一个块（label 主行 / sub 次要行 / error 错误行 / quota 进度条行）
+  // 其余每行一个块：label、sub、error、quota。
   return rows.map((r, i) => {
-    // 展开态一行 = 一个窗口：窗口名 + 进度条 + 已用百分比 + 重置倒计时
-    // （四段都用 flex 同一行排，进度条吃剩余宽度，故条长 = 已用比例）
+    // 展开态一行一个窗口；四段 flex 同行，进度条吃剩余宽度。
     if (r.role === 'quota') {
       return h('div', {
         key: i,
@@ -160,20 +146,16 @@ function rowsToNodes(h: typeof jsx, rows: BalanceBubbleRow[]): ReactNode {
   });
 }
 
-/** 自定义节点树 → React 节点（custom 形态的渲染器，与 rowsToNodes 并列）。
- *
- * 与 rowsToNodes 的分工：行数据是**插件定好**的排版（role → class），这里把**第三方定好**的
- * tag/内联样式/文本原样映射成 JSX。没有 `innerHTML`、没有 HTML 字符串，所以不存在注入面；
- * tag 与样式白名单在 shared 的解析层（parse.ts）已经裁过，到这里的树是可信输入，渲染器不做二次校验。
- *
- * 文本与子节点可同时存在：先文本、后子节点（与 DOM 的 textContent + appendChild 顺序一致），
- * 这样第三方写「<span>余额 </span><span>8.16</span>」这类混排不需要额外的 text 节点语法。
+/** 把自定义节点树映射成 React 节点，与 rowsToNodes 并列。
+ *  行数据由插件定排版，这里把第三方定好的 tag、内联样式与文本原样映射。
+ *  解析层已做白名单裁剪，故不做二次校验；不用 innerHTML，没有注入面。
+ *  先文本后子节点，与 DOM 的 textContent + appendChild 顺序一致。
  */
 function treeToNodes(h: typeof jsx, node: CustomNode, key: string | number): ReactNode {
   const props: Record<string, unknown> = { key };
   if (node.style) props.style = node.style;
   if (node.tag === 'img') {
-    // 配图：地址只来自解析层的 http/https 白名单；alt 留空（内容由周围文本承担）
+    // 配图地址只来自解析层的 http/https 白名单；alt 留空由周围文本承担。
     props.src = node.src ?? '';
     props.alt = '';
     return h('img', props);
@@ -187,31 +169,24 @@ function treeToNodes(h: typeof jsx, node: CustomNode, key: string | number): Rea
   return h(node.tag, props);
 }
 
-/** 展开/收起时换内容的等待时长（ms）：与 .dsh-pet-bubble 的 opacity 过渡同为 .25s，
- *  淡出走完后才换内容，否则内容会在半透明时被替换 = 看得见的硬切 */
+/** 换内容前的淡出等待（ms），与 opacity 过渡同为 250ms。 */
 const BALANCE_FADE_MS = 250;
 
-/**
- * 制造余额气泡（工厂）。
- * 工厂内注入样式一次（与 pet.ts 的 injectCss 同模式）；组件为哑组件，props = { state, on, index, onCycle }。
- * 内容来自 src/shared 的 balanceBubbleView / balanceDetailView（与桌面模式完全一致）。
- *
- * 两种内容语言（按 state.shape 分）：
- *  - 内置三形态：行数据。收起态两行，展开态（点气泡）三窗口各一行；
- *  - custom：第三方节点树，`views` 里第 index 项。
- * 切页（含内置的收/展）是淡出 → 换内容 → 淡入，不是硬切。显隐与 10s 计时仍归上层（pet.ts）管。
+/** 制造余额气泡组件（工厂），注入样式一次。
+ *  内容来自 shared 的 balanceBubbleView / balanceDetailView；内置形态走行数据，
+ *  custom 走第三方节点树。切页是淡出 → 换内容 → 淡入，显隐与 10s 计时归 pet.ts 管。
  */
 export function makeBalanceBubble(rt: {
   h: typeof jsx;
   useState: <T>(init: T) => [T, Dispatch<SetStateAction<T>>];
-  // 用 React 命名空间类型而非 typeof（同 pet.ts：type-only import 的 hook 无法进入声明导出）
+  // 用 React 命名空间类型而非 typeof：type-only import 的 hook 无法进入声明导出（TS4078）。
   useEffect: (effect: ReactNS.EffectCallback, deps?: ReactNS.DependencyList) => void;
 }): (props: {
   state: BalanceState;
   on: boolean;
-  /** 目标页（0 = 初始页；内置 windows 形态下 0 = 收起、1 = 展开） */
+  /** 目标页：0 为初始页；内置 windows 形态下 0 收起、1 展开。 */
   index: number;
-  /** 点击气泡：上层据此切到下一页并重置 10s 计时器 */
+  /** 点击气泡：上层切到下一页并重置 10s 计时器。 */
   onCycle: () => void;
 }) => ReactNode {
   const { h, useState, useEffect } = rt;
@@ -228,7 +203,7 @@ export function makeBalanceBubble(rt: {
     index: number;
     onCycle: () => void;
   }) {
-    // 目标是 index，实际显示的是 shown —— 两者分开是为了留出「先淡出、再换内容」的那 250ms。
+    // shown 是实际显示页，index 是目标页；分开是为了留出淡出换内容的 250ms。
     const [shown, setShown] = useState(0);
     const [fading, setFading] = useState(false);
     useEffect(() => {
@@ -241,17 +216,14 @@ export function makeBalanceBubble(rt: {
       return () => window.clearTimeout(timer);
     }, [index, shown]);
 
-    // 展示语言二选一：内置三种形态给「行数据」，custom 给「第三方节点树」（见 shared/balance/view.ts）。
-    // custom 的页索引越界（页数变少）时夹到最后一页，不显示上一轮的残页。
+    // 行数据与第三方节点树二选一；custom 页索引越界时夹到最后一页，避免显示残页。
     const isCustom = state.ok && state.shape === 'custom';
     const views = isCustom ? customViews(state) : undefined;
     const tree = views ? views[Math.min(shown, views.length - 1)] : undefined;
     const rows = isCustom ? [] : shown > 0 ? balanceDetailView(state) : balanceBubbleView(state);
-    // 可点：windows 有三窗口读数可展开；custom 只有**多于 1 页**才可点（一页点开也没别的内容）。
-    // money（账户余额）/ points（积分）与不可用状态点开也没别的内容，保持不可点（气泡继续不挡页面）。
+    // 可点：windows 可展开；custom 只有多于 1 页才可点；其余形态点开没有新内容。
     const clickable = state.ok && (state.shape === 'windows' || (isCustom && customClickable(state)));
-    // 不可用状态（不支持/缺凭证/抓取失败）是**多行文字说明**：套用碎碎念的换行变体
-    // （字号缩到 0.75、宽度下限更窄，多行说明更紧凑；折行现在已是气泡的通用行为）
+    // 不可用状态是多行说明，套用碎碎念的窄字号变体。
     const wrap = state.ok ? '' : ' dsh-pet-whisper';
     return h('div', {
       className:
@@ -261,7 +233,7 @@ export function makeBalanceBubble(rt: {
         (clickable ? ' is-clickable' : '') +
         (shown > 0 ? ' is-expanded' : '') +
         (fading ? ' is-fading' : ''),
-      // 就地吞掉：宠物本体（.dsh-pet-hit）的点击/拖拽不能被这次点击碰到
+      // 就地吞掉，避免触发宠物本体的点击与拖拽。
       onClick: clickable
         ? (e: ReactNS.MouseEvent<HTMLDivElement>) => {
             e.stopPropagation();
@@ -273,16 +245,9 @@ export function makeBalanceBubble(rt: {
   };
 }
 
-/**
- * 制造碎碎念气泡（工厂）。
- * 与余额气泡共用同一套样式（dsh-pet-bubble）与行渲染（rowsToNodes）；
- * 内容来自 src/shared 的 whisperBubbleView（与桌面模式完全一致）。
- * image：配图名称（配置 memes 的键），有值则在文字上方渲染该表情包；
- *        图片样式取自 shared 的 MEME_BUBBLE_CSS（两端同一份，这里只声明式建节点）。
- * url：配图的另一种形态（第三方自带的完整地址），**与 image 二选一**（host 判定层保证），
- *        有值就直接当 img.src 用、不再拼表情包路径（issue #122 第 1 条）。
- * assetRoot：**只在 image 形态下有意义**——素材根（= 该宠物的条目 key），决定图片去哪个表情包
- *        目录链取（种类独占 pet/<名>-memes/ → 用户目录 → 包内），与动画素材同一套归属语义。
+/** 制造碎碎念气泡组件（工厂），与余额气泡共用样式与行渲染。
+ *  image 是池内名（按素材根拼路径），url 是第三方完整地址，两者互斥且由 host 判定层保证。
+ *  有配图时渲染在文字上方，图片样式取自 shared 的 MEME_BUBBLE_CSS。
  */
 export function makeWhisperBubble(rt: {
   h: typeof jsx;
@@ -307,9 +272,7 @@ export function makeWhisperBubble(rt: {
     const rows = whisperBubbleView({ ok: true, text, ts: 0 });
     const key = String(image ?? '').trim();
     const href = String(url ?? '').trim();
-    // 配图两种形态二选一（host 判定层保证）：url = 第三方自带的完整地址，直接用；image = 该条目
-    // 表情包池内的名称，按素材根拼路径。判别位在字段名上，不靠 startsWith('http') 嗅探
-    // （名字恰好长得像地址时会判错）。
+    // 配图二选一：url 直接用，image 按素材根拼路径；判别位在字段名上，不靠 startsWith 嗅探。
     const src = href || (key ? memeImageUrl(key, '/dsh-pet-7340', assetRoot) : '');
     return h('div', {
       className: 'dsh-pet-bubble dsh-pet-whisper' + (src ? ' ' + MEME_BUBBLE_CLASS : '') + (on ? ' is-on' : ''),
@@ -318,8 +281,7 @@ export function makeWhisperBubble(rt: {
             h('img', {
               key: 'img',
               className: MEME_IMG_CLASS,
-              // 名称形态：基址是本页 origin 下的路由前缀（与上面 @font-face 同一个字面量）；
-              // url 形态：src 就是那个完整地址，与本页 origin 无关
+              // 名称形态拼本页路由前缀；url 形态是完整地址，与本页 origin 无关。
               src,
               alt: key || href,
             }),

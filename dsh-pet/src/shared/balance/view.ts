@@ -1,16 +1,20 @@
-// 气泡行数据的主出口（浏览器与桌面共用同一份内容/文案）：
-// BalanceState → BalanceBubbleRow[]，纯函数，不碰 DOM/React。
-//
-// 形态相关的文案不在这里：这里只负责「不可用状态」的说明行 + 按形态查分发表。
+/**
+ * 气泡行数据的主出口：把余额状态转成气泡行，浏览器与桌面共用同一份内容与文案。
+ *
+ * 纯函数，不碰 DOM 与 React；形态相关的文案也不在这里，本模块只负责不可用状态的说明行，
+ * 其余按形态查分发表。必须始终成立：不可用时绝不伪造数字。
+ *
+ * @module dsh-pet/src/shared/balance/view
+ */
 
 import { HANDLERS } from './handlers';
 import type { BalanceBubbleRow, BalanceState, BalanceUnavailable, CustomNode } from './types';
 
-/** 不可用状态的气泡行（显式说明原因，绝不伪造数字）：
- *  - unsupported：服务商未登记查询接口（配置事实，不是故障）→ 报出 provider id，便于自查"当前到底是谁"
- *  - credential-missing：缺凭证 → 次要行放 host 报的凭证名（不含 message 时不留空行）
- *  - fetch-error：抓取失败 → 次要行放底层错误
- * 次要行为空的会被剔除：空 div 在气泡里会白占一行高度。 */
+/**
+ * 不可用状态的气泡行：显式给出原因，绝不伪造数字。
+ *
+ * 次要行为空的会被剔除——空 div 在气泡里会白占一行高度。
+ */
 function unavailableRows(state: BalanceUnavailable): BalanceBubbleRow[] {
   const rows: BalanceBubbleRow[] =
     state.reason === 'unsupported'
@@ -20,8 +24,7 @@ function unavailableRows(state: BalanceUnavailable): BalanceBubbleRow[] {
         ]
       : state.reason === 'credential-missing'
         ? [
-            // host 的 message 本身已带「缺少凭证 X」前缀：这里只作次要行原样展示，不再加前缀
-            // （曾经的「缺少凭证：缺少凭证 X」双重前缀）
+            // host 的 message 已自带「缺少凭证 X」前缀，这里原样展示，不再加前缀。
             { role: 'error', text: '缺少余额查询凭证' },
             { role: 'sub', text: state.message ?? '' },
           ]
@@ -33,14 +36,10 @@ function unavailableRows(state: BalanceUnavailable): BalanceBubbleRow[] {
 }
 
 /**
- * 把 BalanceState 渲染成气泡行数据（纯函数，不碰 DOM/React）：
- * - windows：两行 —— 「X额度已用 N%」+ 重置倒计时
- * - money：一行 —— 「余额（峰/谷）¥x.xx」（峰红/谷绿由 role:'tier' 表达）；
- *   服务商没给档位装饰时退化成「余额 ¥x.xx」，不替它编一个峰谷
- * - points：一行 —— 「余额 800 积分」（单位由数据带出，绝不套货币符号）
- * - **custom：返回空数组** —— 该形态的展示语言是节点树，走同文件下方的 customViews()；
- *   两端渲染入口都先判 shape === 'custom'，这里的空数组只在"误用行数据"时兜底成空气泡
- * - 无效：显式展示不可用原因（见 unavailableRows），绝不伪造数字
+ * 把余额状态渲染成气泡行数据。
+ *
+ * 形态文案由各 handler 提供；custom 形态返回空数组——它走节点树这条并行通道（见下方 customViews），
+ * 空数组只在误用行数据时兜底成空气泡。不可用时显式展示原因，绝不伪造数字。
  */
 export function balanceBubbleView(state: BalanceState): BalanceBubbleRow[] {
   if (!state.ok) return unavailableRows(state);
@@ -48,10 +47,10 @@ export function balanceBubbleView(state: BalanceState): BalanceBubbleRow[] {
 }
 
 /**
- * 展开态行数据（点余额气泡后显示）：只有 windows 有三窗口读数可展开，每个存在窗口一行。
+ * 展开态的气泡行，点开余额气泡后显示。
  *
- * money / points 形态没有"窗口"这个概念（只有账户余额 / 积分），也没有额外的 handler.detail，
- * 于是回落到收起态视图 —— 展开前后内容一致，不会出现"点了一下却什么都没变"的空交互。
+ * 只有 windows 有三窗口读数可展开，每个存在的窗口一行；money 与 points 没有窗口概念，
+ * 回落到收起态视图，避免点了一下却什么都没变的空交互。
  */
 export function balanceDetailView(state: BalanceState): BalanceBubbleRow[] {
   if (!state.ok) return unavailableRows(state);
@@ -59,15 +58,12 @@ export function balanceDetailView(state: BalanceState): BalanceBubbleRow[] {
   return handler.detail ? handler.detail(state) : handler.rows(state);
 }
 
-// ---- 自定义气泡（shape:'custom'）：节点树这条并行通道 ----
-//
-// 与行数据的分工：行数据（BalanceBubbleRow[]）由插件定好"长什么样"，只填文案；节点树把布局本身
-// 交给第三方。两种通道互斥（按 shape 分），渲染入口先判 custom 再决定走哪条 —— 这是**唯一**
-// 需要两端各判一次的地方，其余展示逻辑（显隐、10s 计时、点击切页、淡入淡出）完全共用。
+// 自定义气泡（custom 形态）走节点树这条并行通道：行数据由插件定好长什么样，只填文案；
+// 节点树把布局本身交给第三方。两种通道按 shape 互斥，两端渲染入口各判一次即可，其余展示逻辑共用。
 
 /**
- * 多页节点树：只有 `shape:'custom'` 有，其余形态一律 undefined（调用方据此回落行数据）。
- * 第 1 项是初始页；>1 页时气泡可点，点一下切下一页（末页回第一页）。
+ * 多页节点树：只对 custom 形态有值，其余形态返回 undefined，调用方据此回落行数据。
+ * 第一项是初始页；多于一项时气泡可点，点一下切下一页，末页回第一页。
  */
 export function customViews(state: BalanceState): CustomNode[] | undefined {
   if (!state.ok || state.shape !== 'custom') return undefined;
@@ -76,8 +72,9 @@ export function customViews(state: BalanceState): CustomNode[] | undefined {
 }
 
 /**
- * custom 是否可点切页 —— 两端据此决定气泡可不可点（内置形态只有 windows 可点）。
- * 只有一页 = 点开也没别的东西，保持不可点（气泡继续不挡页面）。
+ * custom 气泡是否可点切页，两端据此决定气泡可不可点。
+ *
+ * 只有一页时点开也没有别的内容，保持不可点，气泡继续不挡页面。
  */
 export function customClickable(state: BalanceState): boolean {
   return (customViews(state)?.length ?? 0) > 1;

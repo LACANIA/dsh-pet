@@ -1,49 +1,30 @@
 /**
- * 第三方右键菜单注册表（进程内存态，DSH 重启即清空；不落盘）。
+ * 第三方右键菜单注册表（进程内存态，DSH 重启即清空，不落盘）。
  *
- * 用途：别的插件想在桌宠右键菜单里加自己的入口，就走这里注册；用户点了之后，注册方用它自己的
- * owner 去查"我这一项被点了没有、是哪只宠物上点的"。
- *
- * 数据形状（两层，没有第三层）：
- *
- *   owners: Map<owner, { target, items: Map<label, petId | null> }>
- *           键 = owner（身份键，同时也是一级分组名）
- *           target = 这个 owner 的菜单项显示在哪个端（web / desktop / both；缺省 both）
- *           items  = label → 触发它的宠物 id；null = 没点过
- *
- * 语义要点（实现前先读完，都是刻意的）：
- *  - **注册 = 整体覆盖**：该 owner 的菜单项 = 本次 labels 事件（不在列表里的项连同触发标记一起
- *    丢弃）。没有单独的删除接口——注销就再注册一个空列表？不，空列表按非法处理（400），
- *    所以"不想要了"只能注册一份新的（或等进程重启）。这是有意的：菜单项生命周期与插件一致。
- *  - **端归属是 owner 级**：一次注册一个 `target`，跟 labels 一起被整体覆盖，不按单条菜单项分开。
- *    缺省 `both`——加这个字段之前的行为，老调用方（只传 owner + labels）一个字都不用改。
- *  - **同 owner 内 label 唯一**：重复 label 去重（保留第一次出现的顺序）。
- *  - **点击是闩锁不是队列**：同一项连点两次，查询只看到"点过"一次；不计数、不排序。
- *  - **查询即清空**（读取即消费）：返回后把这些标记全部清成 null。没有确认、没有重投——
- *    查询方没处理完就崩了，这次触发就丢了（对"用户点了一下菜单"这种一次性触发是合理取舍）。
- *  - **一个 owner 只该有一个消费者**：两个进程同时查会互抢（谁先返回谁拿到标记）。
- *
- * 限额（防本机进程把菜单/内存刷爆）：
- *  - owner ≤ 64 字符、label ≤ 32 字符（都允许中文，trim 后非空，禁控制字符）
- *  - 每 owner ≤ 20 项、全局 ≤ 32 个 owner
+ * 注册方用自己的 owner 注册菜单项，再用同一个 owner 查「我这一项被点了没有、在哪只宠物上点的」；
+ * 不负责菜单渲染与点击命中（两端按 target 过滤后自己拼「更多」）。必须始终成立：注册是 owner 级的
+ * 整体覆盖，菜单项生命周期与插件一致；点击是闩锁不是队列（连点两次只看到一次）；查询即清空（读取
+ * 即消费，没确认也没重投）；一个 owner 只该有一个消费者，两个进程同时查会互抢。
+ * 限额见下方常量；契约见 API.md 与 openapi.yaml。
+ * @module dsh-pet/src/host/menu
  */
 
-/** owner 长度上限 */
+/** owner 长度上限。 */
 const OWNER_MAX = 64;
-/** 单个菜单项 label 长度上限（面板宽 150–240px，再长会被省略号截断） */
+/** 单个菜单项 label 长度上限（面板宽 150–240px，再长会被省略号截断）。 */
 const LABEL_MAX = 32;
-/** 每 owner 菜单项上限 */
+/** 每 owner 菜单项上限。 */
 const ITEMS_MAX = 20;
-/** 全局 owner 上限 */
+/** 全局 owner 上限。 */
 const OWNERS_MAX = 32;
-/** 长轮询等待上限（与 /state 同一量级：调用方一次最多挂这么久） */
+/** 长轮询等待上限（与 /state 同一量级：调用方一次最多挂这么久）。 */
 export const MENU_WAIT_MAX_MS = 10_000;
 
-/** 控制字符（换行/制表等会把菜单布局搞炸，一律拒绝） */
-// eslint-disable-next-line no-control-regex
+/** 控制字符（换行、制表等会把菜单布局搞炸，一律拒绝）。 */
+// eslint-disable-next-line no-control-regex -- 菜单文案必须拒绝 \x00-\x1f 与 \x7f 控制字符（会破坏布局），去掉匹配等于放行
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 
-/** 一条菜单项快照（写进 /state 的 sections.menu，两端据此拼「更多」） */
+/** 一条菜单项快照（写进 /state 的 sections.menu，两端据此拼「更多」）。 */
 export interface MenuItemSnapshot {
   owner: string;
   label: string;
@@ -51,19 +32,19 @@ export interface MenuItemSnapshot {
   target: MenuTarget;
 }
 
-/** 菜单项显示在哪个端 */
+/** 菜单项显示在哪个端。 */
 export type MenuTarget = 'web' | 'desktop' | 'both';
 
-/** 合法的 target 取值 */
+/** 合法的 target 取值。 */
 const MENU_TARGETS: ReadonlySet<string> = new Set<string>(['web', 'desktop', 'both']);
 
-/** 缺省 target = 两端都显示（= 加这个字段之前的行为） */
+/** 缺省 target = 两端都显示（= 加这个字段之前的行为）。 */
 const DEFAULT_TARGET: MenuTarget = 'both';
 
-/** 注册结果：业务失败按插件口径回 `{ ok:false, reason, message }`（HTTP 200），不是 400 */
+/** 注册结果：业务失败按插件口径回 `{ ok:false, reason, message }`（HTTP 200），不是 400。 */
 export type MenuRegisterResult = { ok: true } | { ok: false; reason: string; message: string };
 
-/** 校验一个显示用字符串：必须是 string、trim 后非空、不超长、无控制字符 */
+/** 校验一个显示用字符串：必须是 string、trim 后非空、不超长、无控制字符。 */
 function displayText(value: unknown, max: number): string | null {
   if (typeof value !== 'string') return null;
   const text = value.trim();
@@ -71,6 +52,7 @@ function displayText(value: unknown, max: number): string | null {
   return text;
 }
 
+/** 第三方菜单项的进程内注册表：注册、清空、点击上报、长轮询查询。 */
 export class MenuRegistry {
   // 用 declare + 构造器赋值（不用类字段初始化器）：类字段会降级出 @oxc-project/runtime 外部
   // helper，而它是未声明的依赖，会被 prepack 门禁拦下（同 src/host/state.ts 的约定）。
@@ -87,9 +69,8 @@ export class MenuRegistry {
   /**
    * 注册（整体覆盖）：`{ owner, labels: string[], target?: 'web' | 'desktop' | 'both' }`。
    *
-   * 覆盖的粒度是 **owner 的全部菜单项**，不是逐项 upsert：这样注册方每次都能用一份完整列表
-   * 描述"我现在有什么"，不必关心上次注册了什么，也不会留下已下线的僵尸项。
-   * `target` 选填、缺省 `both`（老调用方零改动）；它跟 labels 一起被整体覆盖。
+   * 覆盖粒度是整个 owner：注册方每次用一份完整列表描述「我现在有什么」，不必关心上次注册了什么，
+   * 也不会留下已下线的僵尸项。`target` 选填、缺省 `both`（老调用方零改动），与 labels 一起被覆盖。
    */
   register(raw: unknown): MenuRegisterResult {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -125,8 +106,8 @@ export class MenuRegistry {
     if (!this.owners.has(owner) && this.owners.size >= OWNERS_MAX) {
       return { ok: false, reason: 'too-many-owners', message: `最多 ${OWNERS_MAX} 个 owner` };
     }
-    // target 选填：不写 / null = both（老调用方只传 owner + labels 时一个字都不用改）；
-    // 写了就必须是三个字面量之一——非法值只报错、不猜，免得第三方以为注册成功却看不到菜单。
+    // target 选填：不写 / null = both（老调用方只传 owner + labels 时一个字都不用改）；写了就必须
+    // 是三个字面量之一——非法值只报错、不猜，免得第三方以为注册成功却看不到菜单。
     const rawTarget = body.target;
     let target: MenuTarget = DEFAULT_TARGET;
     if (rawTarget !== undefined && rawTarget !== null) {
@@ -146,9 +127,8 @@ export class MenuRegistry {
   /**
    * 清掉一个 owner 的全部菜单项（连它上面未取走的触发标记一起丢）。
    *
-   * 幂等：owner 本来就不存在 → `removed: 0`，仍算成功——调用方重试注销时不该看到错误。
-   * 挂在该 owner 上的长轮询会被叫醒，醒来后查不到 owner → `null`（路由回 `ok:false` +
-   * `unknown-owner`），调用方据此知道要重新注册。
+   * 幂等：owner 本来就不存在 → `removed: 0`，仍算成功，调用方重试注销时不该看到错误。
+   * 挂在该 owner 上的长轮询会被叫醒，醒来后查不到 owner → 路由回 `unknown-owner`。
    */
   clear(rawOwner: unknown): { ok: true; removed: number } | { ok: false; reason: string; message: string } {
     const owner = displayText(rawOwner, OWNER_MAX);
@@ -165,7 +145,7 @@ export class MenuRegistry {
     return { ok: true, removed };
   }
 
-  /** 全量快照（写进 state；顺序 = 注册顺序 + 列表顺序，两端渲染顺序与它一致） */
+  /** 全量快照（写进 state；顺序 = 注册顺序 + 列表顺序，两端渲染顺序与它一致）。 */
   snapshot(): MenuItemSnapshot[] {
     const out: MenuItemSnapshot[] = [];
     for (const [owner, entry] of this.owners) {
@@ -175,10 +155,10 @@ export class MenuRegistry {
   }
 
   /**
-   * 渲染端上报一次点击：把该项标成"被 petId 点了"，并叫醒该 owner 上挂着的长轮询。
+   * 渲染端上报一次点击：把该项标成「被 petId 点了」，并叫醒该 owner 上挂着的长轮询。
    *
-   * `delivered = false`（项不存在：菜单刚好被覆盖/还没注册）**不算错误**——渲染端拿着的是
-   * 上一拍 /state 的快照，这一拍菜单已经变了，属于正常竞态，路由仍回 200。
+   * `delivered = false`（项不存在：菜单刚好被覆盖、还没注册）不算错误——渲染端拿的是上一拍
+   * /state 快照，这一拍菜单已经变了，属于正常竞态，路由仍回 200。
    */
   click(raw: unknown): { ok: true; delivered: boolean } {
     const body = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
@@ -194,10 +174,10 @@ export class MenuRegistry {
   }
 
   /**
-   * 查询触发：返回 `{ label: petId | null }` 全量映射，**返回即清空**这些标记。
+   * 查询触发：返回 `{ label: petId | null }` 全量映射，返回即清空这些标记。
    *
-   * `waitMs > 0` 且当下没有任何触发 → 挂起等待（该 owner 被点/超时/被覆盖都会唤醒），
-   * 超时后照常返回全 null 的映射。owner 不存在 → null（路由回 404，调用方据此知道要重新注册）。
+   * `waitMs > 0` 且当下没有任何触发 → 挂起等待（被点、超时、被覆盖都会唤醒），超时后照常返回
+   * 全 null 的映射。owner 不存在 → null（路由回 404，调用方据此知道要重新注册）。
    */
   async poll(owner: string, waitMs: number): Promise<Record<string, string | null> | null> {
     const entry = this.owners.get(owner);
@@ -234,7 +214,7 @@ export class MenuRegistry {
   }
 }
 
-/** 该 owner 当前有没有任意一项被点过 */
+/** 该 owner 当前有没有任意一项被点过。 */
 function hasFired(items: Map<string, string | null>): boolean {
   for (const pet of items.values()) if (pet !== null) return true;
   return false;

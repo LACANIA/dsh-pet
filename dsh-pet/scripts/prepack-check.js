@@ -1,25 +1,12 @@
 #!/usr/bin/env node
 /**
- * ============================================================================
- * prepack-check.js —— 发布前健康检查
- * ============================================================================
+ * 发布前健康检查，由 package.json 的 prepack 触发，任何一项失败都以非零退出码阻断发布。
  *
- * 【作用】
- *   在 `npm publish` / `npm pack` 之前自动运行（由 package.json 的
- *   "prepack" 脚本触发），逐项检查插件包是否"可发布"。
- *   任何一项失败都会置 exit code 为 1，阻止发布一个坏包。
- *
- * 【检查项】
- *   1. 必需文件是否存在（lib、类型声明、patch、对齐参数）
- *   2. 至少有待机动画的 thumb
- *   3. 原始 1200×1200 母版不得进 npm 包（体积超限，应放 GitHub Releases）
- *   4. client.js 是官方 bundle 形态（__ModuleLoader__.load + exports.apply）
- *   5. package.json 声明了 dsh.bundle 和 dsh.client（否则装不上）
- *   6. 表情包图片确实随包发布（files 白名单含 assets/memes 且目录里有 png；
- *      配图功能只读包内 assets/memes，漏发即功能整体失效），并核对 memes 键与图片对齐
- *   7. 包总大小 < 200MB（自设软上限，防误塞母版；npm 硬上限远更大）
- *
- * ============================================================================
+ * 查必需文件、待机动画素材、原始母版是否误入包、client.js 的官方 bundle 形态、
+ * package.json 的 dsh.bundle 与 dsh.client 声明、表情包图片与配置键是否对齐、包体积上限，
+ * 以及构建产物有没有引入未声明的 @oxc-project/runtime helper。
+ * 只读检查，不构建、不打包、不改任何文件，依赖已构建好的 lib 与 assets。
+ * @module dsh-pet/scripts/prepack-check
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -27,13 +14,13 @@ import { fileURLToPath } from 'node:url';
 
 // 包根目录（scripts/ 的上一级）
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-// 失败/通过 的输出辅助
+// 失败与通过两种输出的辅助函数。
 const fail = (msg) => {
   console.error(`[prepack-check] FAIL: ${msg}`);
   process.exitCode = 1;
 };
 const ok = (msg) => console.log(`[prepack-check] ok: ${msg}`);
-/** JSONC → JSON：字符串感知地剥离行注释与块注释（config.jsonc 里有行尾注释） */
+/** JSONC → JSON：字符串感知地剥离行注释与块注释（config.jsonc 里有行尾注释）。 */
 const stripJsonc = (s) => {
   let out = '';
   let inStr = false;
@@ -66,7 +53,7 @@ const stripJsonc = (s) => {
   return out;
 };
 
-// ---- 1. 必需文件存在性 ----
+// 缺任一件，装上就是运行期报错，所以在发布前逐个点名。
 const required = [
   'lib/index.js', // 宿主半侧
   'lib/client.js', // 浏览器半侧
@@ -89,12 +76,12 @@ for (const f of required) {
   existsSync(join(ROOT, f)) ? ok(`exists ${f}`) : fail(`missing ${f}`);
 }
 
-// ---- 2. 至少有待机动画（播放必需）——单一 webm 格式（浏览器 + 桌面模式共用）----
+// 待机动画是播放链的起点，缺了宠物立不起来；浏览器与桌面 Helper 共用这一份 webm。
 const idleWebm = join(ROOT, 'assets', 'webm', '待机呼吸休闲.webm');
 existsSync(idleWebm) ? ok('idle webm present') : fail('missing 待机呼吸休闲.webm thumb');
 
-// ---- 3. 原始母版不得进 npm 包 ----
-// assets/ 根下若有 .webm 就是原始母版（播放素材在 assets/webm|mov 子目录）
+// 原始母版（1200×1200）体积超限，应放 GitHub Releases，不进 npm 包。
+// assets/ 根下若有 .webm 就是原始母版，播放素材在 assets/webm|mov 子目录。
 const originals = [];
 const assetsRoot = join(ROOT, 'assets');
 for (const name of readdirSync(assetsRoot)) {
@@ -104,7 +91,7 @@ if (originals.length > 0)
   fail(`original masters must not ship in npm package: ${originals.join(', ')} (move them to GitHub Releases)`);
 else ok('no original masters in assets/');
 
-// ---- 4. client.js 必须是官方 bundle 形态（含插件三件套导出） ----
+// 宿主加载器只认官方 bundle 形态；形制不对，插件在浏览器半侧根本注册不上。
 const client = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8');
 client.includes('__ModuleLoader__.load')
   ? ok('client bundle shell OK')
@@ -113,16 +100,16 @@ const exportsPlugin =
   /exports\.(apply|inject|name)/.test(client) || /module\.exports\s*=\s*\{[^}]*apply[^}]*inject[^}]*name/.test(client);
 exportsPlugin ? ok('client exports apply/inject/name') : fail('client.js missing apply/inject/name exports');
 
-// ---- 5. package.json 必须声明 bundle + client ----
+// 两项声明缺任一个都装不进宿主：bundle 声明决定挂载声明，client 声明决定浏览器半侧注入。
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 if (pkg.dsh?.bundle?.patch) ok('dsh.bundle.patch declared');
 else fail('package.json missing dsh.bundle.patch');
 if (pkg.dsh?.client?.platform === 'web') ok('dsh.client.web declared');
 else fail('package.json missing dsh.client platform web');
 
-// ---- 6. 表情包图片必须随包发布（配图功能的素材源） ----
-// 坑：scripts/prepare.js 每次发布都会用**硬编码白名单覆盖** package.json 的 files，
-// 只在 package.json 里加一行是无效的 → 这里显式断言，防止再次静默漏发。
+// 配图功能只读包内 assets/memes，漏发即整体失效。
+// scripts/prepare.js 每次发布都用硬编码白名单覆盖 package.json 的 files，
+// 只在 package.json 里加一行是无效的，故这里显式断言，防止再次静默漏发。
 const memesDir = join(ROOT, 'assets', 'memes');
 if (Array.isArray(pkg.files) && pkg.files.includes('assets/memes')) ok('files includes assets/memes');
 else fail('package.json files must include assets/memes (meme images would not ship)');
@@ -148,7 +135,8 @@ try {
   console.log(`[prepack-check] note: 跳过 memes 键对齐核对（config.jsonc 解析失败：${e.message}）`);
 }
 
-// ---- 7. 包总大小估算（排除 node_modules/.git/脚本/素材源目录/README预览GIF） ----
+// 估算将进包的总大小：跳过 node_modules、.git、脚本、母版目录与 preview，
+// 另不计 sourcemap 与 npm pack 遗留的 tarball。
 let total = 0;
 const walk = (dir) => {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -167,12 +155,10 @@ const mb = (total / 1e6).toFixed(1);
 if (total > 200e6) fail(`package too large: ${mb}MB (limit 200MB)`);
 else ok(`package size ${mb}MB`);
 
-// ---- 8. 构建产物不得引入未声明的外部 helper（@oxc-project/runtime） ----
-// rolldown 在 target es2020 下会为「带初始化器的类字段」这类降级语法产出
-// `import _defineProperty from "@oxc-project/runtime/helpers/defineProperty"`；而该包既不在本包
-// dependencies 里、也不随包发布（宿主 DSH 的安装树里同样没有）→ DSH 加载插件树时直接
-// ERR_MODULE_NOT_FOUND，整个 profile 起不来（issue #59 改动踩过一次，见 src/host/helper-process.ts
-// 的约定：类字段一律 `declare` + 构造器赋值，避免降级出外部 helper）。
+// rolldown 在 target es2020 下会为「带初始化器的类字段」产出降级语法，
+// 打包结果里就会多出 `import _defineProperty from "@oxc-project/runtime/helpers/defineProperty"`；
+// 该包既不在 dependencies 也不随包发布，宿主加载插件树时会 ERR_MODULE_NOT_FOUND，整个 profile 起不来。
+// 约定是类字段一律 declare 加构造器赋值，避免降级出外部 helper（见 src/host/helper-process.ts）。
 const OXC_RUNTIME = '@oxc-project/runtime';
 const oxcBundles = ['lib/index.js', 'lib/client.js'].filter((f) => {
   const p = join(ROOT, f);
@@ -185,6 +171,5 @@ if (oxcBundles.length > 0)
   );
 else ok(`no undeclared ${OXC_RUNTIME} import in bundles`);
 
-// ---- 汇总 ----
 if (process.exitCode) console.error('\n[prepack-check] fix the failures above before publishing.');
 else console.log('\n[prepack-check] all checks passed — ready to pack/publish.');

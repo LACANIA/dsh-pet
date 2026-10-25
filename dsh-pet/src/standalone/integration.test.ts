@@ -1,10 +1,10 @@
 /**
- * 端到端契约：伪 ctx + **真实 apply** + 真实 `node:http` 服务。
+ * 端到端契约：伪 ctx + 真实 apply + 真实 `node:http` 服务。
  *
  * 这一层回答"独立模式到底有没有把插件自己的宿主半边跑起来"，并钉住三件事：
  *   1. `apply` 注册的路由前缀确实被独立服务接管 —— 只有一份路由表，没有第二套实现；
  *   2. 不依赖包内素材的端点与 DSH 内同形（`/state`、`/models`、`/config/meta` 的路径口径）；
- *   3. 路径安全与"配置不可达"的口径经**真实 HTTP** 仍然成立（独立服务不重写 URL、不吞异常）。
+ *   3. 路径安全与"配置不可达"的口径经真实 HTTP 仍然成立（独立服务不重写 URL、不吞异常）。
  *
  * 覆盖范围的限制与 `routes.test.ts` 相同：源码形态下包根解析成 `<pkg>/src`，
  * 包内 `assets/config.jsonc` 不可达 → `readAllConfig` 必抛。因此这里不断言"成品配置"，
@@ -96,7 +96,7 @@ test('real plugin chat routes cannot bypass the standalone capability using enco
       assert.equal(response.status, 403);
       await response.text();
     }
-    // With a valid capability the encoded name reaches the real plugin's parameter validation.
+    // 带上有效凭证时，编码后的名字会走到真实插件的参数校验，最终报 pet-required。
     const response = await fetch(prefix + '%63hat', { headers: { 'X-DSH-Pet-Token': security.token } });
     assert.equal(response.status, 200);
     assert.equal(((await response.json()) as { reason: string }).reason, 'pet-required');
