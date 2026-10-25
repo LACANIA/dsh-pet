@@ -1,18 +1,14 @@
 /**
- * 宿主命令面孔补丁的契约测试 —— 钉住「包装 `commandUi.candidates`」这套机制的全部前提。
- *
- * 为什么值得单独测：DSH 目前没有给第三方**宿主命令**配图标的官方入口（`CommandDefinition`
- * 无 icon 字段、`CommandDecoration` 只有 ui、前端 `candidates()` 只认 6 个第一方包的白名单），
- * 本插件只能靠「自有属性遮蔽原型方法」这一条内部细节补上面孔。这套机制一旦失效，
- * 表现是「菜单没图标」而不是报错，很容易在升级后无声退化 —— 所以每条前提都要有断言兜住：
- *
- * - 包装后 DSH 的**闭包**（`(s, r) => this.candidates(s, r)`）能取到加工过的行；
- * - 没有面孔的命令、非数组返回、数组里的非对象元素，一律原样放行；
- * - DSH 自己给了 icon 的行不被覆盖（将来官方支持后本补丁自动让位）；
- * - label 每次现取（语言切换下一轮生效）；
- * - 映射逻辑抛错时退回原始行（菜单不会坏），但 original 自己的错误不吞；
+ * 宿主命令面孔补丁的契约测试 —— 钉住「包装 `commandUi.candidates`」的全部前提。
+ * DSH 没有给第三方宿主命令配图标的官方入口（`CommandDefinition` 无 icon 字段、
+ * `CommandDecoration` 只有 ui、`candidates()` 只认 6 个第一方包的白名单），本插件只能靠
+ * 「自有属性遮蔽原型方法」补面孔；失效表现是菜单没图标而不是报错，升级后容易无声退化。
+ * 每条前提都要有断言兜住：
+ * - 包装后 DSH 的闭包（`(s, r) => this.candidates(s, r)`）能取到加工过的行；
+ * - 没有面孔的命令、非数组返回、非对象元素，一律原样放行；
+ * - DSH 自己给了 icon 的行不被覆盖；label 每次现取（语言切换下一轮生效）；
+ * - 映射逻辑抛错时退回原始行，但 original 自己的错误不吞；
  * - `candidates` 缺失时完全不装；dispose 能还原。
- *
  * 跑法：node --experimental-strip-types --test src/client/command-faces.test.ts
  */
 import { test, describe } from 'node:test';
@@ -25,7 +21,7 @@ type Row = Record<string, unknown>;
 
 /**
  * 复刻 dsh-client-ui-commands 的 `CommandUiRuntime` 关键形态：
- * `candidates` 是**原型方法**（不是实例字段），所以自有属性可以遮蔽它。
+ * `candidates` 是原型方法（不是实例字段），所以自有属性可以遮蔽它。
  */
 class FakeCommandUi {
   rows: unknown[];
@@ -45,7 +41,7 @@ class FakeCommandUi {
   }
 }
 
-/** 复刻 DSH 注册 source 的写法：闭包在**运行时**从实例上取 `candidates`。 */
+/** 复刻 DSH 注册 source 的写法：闭包在运行时从实例上取 `candidates`。 */
 function sourceOf(ui: FakeCommandUi): { candidates: (s: unknown, r: unknown) => Promise<unknown> } {
   return { candidates: (session: unknown, req: unknown) => ui.candidates(session, req) };
 }

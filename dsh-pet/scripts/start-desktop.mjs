@@ -1,16 +1,13 @@
 #!/usr/bin/env node
 /**
- * start-desktop.mjs —— 本地开发/手动启动桌面 Helper（不经 DSH 宿主拉起）。
+ * 本地开发或手动启动桌面 Helper，不经宿主拉起。
  *
- * 用法：
- *   node scripts/start-desktop.mjs [configUrl]
- *
- * 环境变量（与宿主拉起时一致）：
- *   DSH_PET_CONFIG_URL / DSH_PET_SCALE / DSH_PET_ELECTRON_PATH
- * 其余端点（thumb/balance/trigger/notify/pic/font）由 renderer 从 configUrl 推导。
- *
- * 示例（对着一台已跑 dsh web 的机器）：
- *   node scripts/start-desktop.mjs http://127.0.0.1:3080/dsh-pet-7340/config
+ * 参数是一个成品配置地址，缺省指向本机 3080 端口的 /dsh-pet-7340/config；
+ * 其余端点由渲染端从 configUrl 推导，本脚本只负责透传。
+ * 不下载 Electron：找不到可执行文件即提示先跑 npm run ensure:electron。
+ * 环境变量与宿主拉起时一致：配置地址、缩放倍数、Electron 路径。
+ * 必须始终：删掉 ELECTRON_RUN_AS_NODE，并带上 DSH_PET_HOST_PID，让 Helper 在本进程退出后自行收尾。
+ * @module dsh-pet/scripts/start-desktop
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -22,7 +19,7 @@ const helperMain = resolve(here, '..', 'runtime', 'electron-helper', 'main.js');
 const defaultConfigUrl =
   process.env.DSH_PET_CONFIG_URL || process.argv[2] || 'http://127.0.0.1:3080/dsh-pet-7340/config';
 
-// 平台适配：Electron 可执行文件相对路径（win32=electron.exe / darwin=Electron.app / linux=electron）
+// Electron 可执行文件相对解压目录的路径（按平台）。
 const PLAT = process.platform;
 const electronRel =
   PLAT === 'win32'
@@ -31,7 +28,7 @@ const electronRel =
       ? join('Electron.app', 'Contents', 'MacOS', 'Electron')
       : 'electron';
 
-// 解析 Electron 可执行文件（不阻塞安装：提示用户先 ensure:electron）
+// 解析 Electron 可执行文件；不自动下载，缺了就提示先跑 ensure:electron。
 const candidates = [
   process.env.DSH_PET_ELECTRON_PATH,
   process.env.ELECTRON_PATH,
@@ -53,13 +50,13 @@ const env = {
   ...process.env,
   DSH_PET_CONFIG_URL: defaultConfigUrl,
   DSH_PET_SCALE: process.env.DSH_PET_SCALE || '1',
-  // 开发流也跟随：本脚本退出（含被强杀）后桌宠自己走，不留一个没人管的 helper
-  // （helper 侧 host-liveness.js 每 2s kill(pid, 0) 一次，ESRCH 即自行退出；见 issue #56）
+  // 开发流也要跟随：本脚本退出（含被强杀）后 Helper 必须自己收尾，不留一个没人管的后台窗口。
+  // Helper 侧 host-liveness.js 每 2s 探测一次本进程 pid，ESRCH 即自行退出。
   DSH_PET_HOST_PID: String(process.pid),
 };
-// 删掉会劫持 Electron 启动模式的变量（issue #63）：终端/宿主里若带着 ELECTRON_RUN_AS_NODE，
+// 删掉会劫持 Electron 启动模式的变量：终端/宿主里若带着 ELECTRON_RUN_AS_NODE，
 // Electron 会以纯 Node 模式启动，main.js 顶部 require('electron') 直接 MODULE_NOT_FOUND。
-// 必须**删键**，不能设空串（实测空串会让 Electron 直接 abort）。
+// 必须删键，不能设空串（实测空串会让 Electron 直接 abort）。
 delete env.ELECTRON_RUN_AS_NODE;
 
 console.log(`[start-desktop] electron:   ${electron}`);

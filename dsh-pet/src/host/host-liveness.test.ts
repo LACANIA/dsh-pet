@@ -1,24 +1,16 @@
 /**
  * issue #56 的判定测试 —— 「宿主退出后 Electron helper 因 stdout EPIPE 崩溃弹窗 / 赖着不走」。
  *
- * 事实链（真机 + 源码都已核对）：
- *   ① helper 的 stdout/stderr 是宿主给的管道（helper-process.ts: stdio ['pipe','pipe','pipe']）；
- *   ② 宿主一退出，管道读端消失；helper 下一次写（bridge 协议行，渲染端每秒至少一条 /broadcast
- *      轮询）拿到 EPIPE —— Windows 真机实测：`EPIPE: broken pipe, write`，栈在 Socket._write；
- *   ③ 未处理的 'error' 事件 = 未捕获异常；Electron 主进程自带的处理器只弹一个模态框、**且不退出**
- *      （lib/browser/init.ts：Don't quit on fatal error）→ 桌宠卡死、进程赖着不走；
- *   ④ Windows 上 Node/libuv 的 job 对象（JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE）会在宿主退出时顺手
- *      杀掉子进程，所以那一幕在 Windows 上看不全；macOS 没这层兜底，就是报告里的样子。
+ * 事实链：helper 的 stdout/stderr 是宿主给的管道，宿主一退出读端消失，下一次写（bridge 协议行）拿到
+ * EPIPE（Windows 实测 `EPIPE: broken pipe, write`）；未处理的 'error' 事件 = 未捕获异常，Electron
+ * 主进程只弹模态框、不退出；Windows 的 job 对象（KILL_ON_JOB_CLOSE）会在宿主退出时顺手杀掉子进程，
+ * 所以那一幕在 Windows 上看不全，macOS 没有这层兜底。
  *
- * 本文件钉三件事：
- *   ① 纯判定规则（"宿主没了"只认 ESRCH；管道断开只认 EPIPE / ERR_STREAM_DESTROYED）；
- *   ② main.js 的接线：两条路（管道守卫 + 宿主探测）都在位、都只经唯一出口、且守卫早于任何一次写；
- *   ③ 宿主侧确实把 pid 注进去了（helper-process.ts 的 spawn 与开发流 start-desktop.mjs），
- *      以及新文件在发布必需清单里（缺了 main.js 启动即崩）。
+ * 本文件钉三件事：① 纯判定规则（宿主没了只认 ESRCH；管道断开只认 EPIPE / ERR_STREAM_DESTROYED）；
+ * ② main.js 的接线：管道守卫 + 宿主探测都在位、都只经唯一出口、且守卫早于任何一次写；
+ * ③ 宿主侧确实把 pid 注进去了，且新文件在发布必需清单里（缺了 main.js 启动即崩）。
  *
- * helper 是随包发行的手写 JS，而开发机上跑不起 Electron（受限环境里 Chromium 建不了自己的 Mojo
- * 命名管道），所以接线只能靠源码断言 + 纯函数测试。
- *
+ * helper 是随包发行的手写 JS，开发机上跑不起 Electron，接线只能靠源码断言 + 纯函数测试；
  * 用 Node 内置 test runner（node:test），不引入任何 npm 依赖。
  */
 import { test, describe } from 'node:test';

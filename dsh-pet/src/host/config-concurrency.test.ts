@@ -10,7 +10,7 @@ import { listenStandaloneServer, type StandaloneServer } from '../standalone/ser
 import { createRequestSecurity } from '../standalone/request-security.ts';
 import { readUserConfig } from './config.ts';
 
-// Bundle the real host into a temporary package so its assets resolve without modifying src/assets.
+// 把真实 host 打包进临时包，让它的 assets 能解析，同时不改动 src/assets。
 const source = fileURLToPath(new URL('..', import.meta.url));
 const pet = (id: string) => ({
   id,

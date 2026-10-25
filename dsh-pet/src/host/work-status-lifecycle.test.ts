@@ -1,12 +1,12 @@
 /**
- * 任务详情文案的生命周期回归（issue #59）—— 在 **handler 层**跑真实事件序列，断言 `/work-status` 快照。
+ * 任务详情文案的生命周期回归（issue #59）—— 在 handler 层跑真实事件序列，断言 `/work-status` 快照。
  *
  * 为什么单独有这一层：`currentTaskFromTodo` / `WorkStatusStore` 的单测只能证明"纯逻辑算得对"，
- * 而 issue #59 的两个现场症状都出在**事件序列 + 生命周期**上：
- *   ① 分阶段任务里文案不随进度走（多个 in_progress 时取了第一个）；
- *   ② 任务结束、之后开一段完全无关的对话，气泡仍挂着旧文案（task 曾是全局粘性字段）。
+ * 而现场症状都出在事件序列 + 生命周期上：
+ *   ① 分阶段任务里文案必须随进度走（多个 in_progress 时取最后一个）；
+ *   ② 任务结束、之后开一段完全无关的对话，气泡必须不挂旧文案（task 不能是全局粘性字段）。
  * 因此这里用最小 ctx 桩把插件真跑起来（与 routes.test.ts 同一套桩思路），发一串真事件，再 GET 端点
- * 读快照——修坏了就会在这条测试上响。每个用例都 apply() 一个**全新实例**，避免用例之间互相影响。
+ * 读快照——修坏了就会在这条测试上响。每个用例都 apply() 一个全新实例，避免用例之间互相影响。
  *
  * 跑法：node --experimental-strip-types --test src/host/work-status-lifecycle.test.ts
  */
@@ -165,7 +165,7 @@ describe('任务文案生命周期 —— 现场场景 1：分阶段任务', () 
     h.emit('s1', TODO(2, ['in_progress', '正在执行 phase1']));
     assert.equal((await h.snapshot()).task, '正在执行 phase1');
 
-    // agent 把 phase2 也标成 in_progress 却没收回 phase1：旧实现取第一个 → 永远停在 phase1
+    // agent 把 phase2 也标成 in_progress 却没收回 phase1：必须取最后一个进行中的步骤
     h.emit('s1', TODO(3, ['in_progress', '正在执行 phase1'], ['in_progress', '正在执行 phase2']));
     assert.equal((await h.snapshot()).task, '正在执行 phase2');
 

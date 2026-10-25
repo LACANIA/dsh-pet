@@ -1,8 +1,11 @@
-// 形态 → 展示规则的分发表。
-//
-// 这里刻意写成 `Record<BalanceShape, ShapeHandler>` 而不是三处 if/switch：以后给 BalanceShape
-// 加形态却忘了补一个 handler，tsc 会直接报「缺少属性」（而不是静默走进别的分支——那正是
-// 「非 money 一律当 windows」那种写法造成的坑）。
+/**
+ * 形态到展示规则的分发表，也是余额展示按形态分发的唯一入口。
+ *
+ * 刻意写成 `Record<BalanceShape, ShapeHandler>` 而不是若干 if/switch：给 BalanceShape 加形态却
+ * 忘了补 handler 时，类型检查会直接报缺少属性，而不是静默走进别的分支。
+ *
+ * @module dsh-pet/src/shared/balance/handlers/index
+ */
 
 import type { BalanceShape } from '../types';
 import { customHandler } from './custom';
@@ -11,6 +14,7 @@ import { pointsHandler } from './points';
 import type { ShapeHandler } from './shape';
 import { windowsHandler } from './windows';
 
+/** 每种形态的展示规则；新增形态必须在此补齐，否则类型检查报错。 */
 export const HANDLERS: Record<BalanceShape, ShapeHandler> = {
   windows: windowsHandler,
   money: moneyHandler,

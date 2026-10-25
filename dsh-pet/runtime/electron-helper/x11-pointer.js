@@ -1,36 +1,18 @@
 'use strict';
 /**
- * Linux 专用：**X11 指针位置查询**（纯 Node，无原生模块、不依赖任何外部命令）。
- *
- * 为什么需要它（issue：桌面模式在 Linux 上点不动）：
- *   桌面宠物窗口默认整窗点击穿透（透明像素不该挡住下层应用），能不能点全靠主进程判断
- *   「光标现在在不在宠物身上」。Windows/macOS 上 `screen.getCursorScreenPoint()` 每次都是实时值；
- *   **Linux/X11 上它返回的是 Chromium 缓存的最后一个鼠标事件位置**——而我们的窗口又恰好
- *   在穿透状态下收不到任何鼠标事件，于是这个值从建窗那一刻起就冻结了：兜底轮询永远拿着
- *   一个陈旧坐标去算，宠物永远翻不成可交互，桌面模式在 Linux 上等于完全点不动。
- *
- *   实测（2026-10，Ubuntu 22.04 / Xorg / Electron 43）：把光标用 XTest 移到宠物身上，
- *   `screen.getCursorScreenPoint()` 仍返回建窗时的旧坐标；X 服务器的 QueryPointer 则是实时的。
- *
- * 做法：直接跟 X server 说 X11 协议的最小必要部分——连接握手（含 MIT-MAGIC-COOKIE-1，
- *   从 Xauthority 读）与 `QueryPointer`（opcode 38）。每 60ms 查一次，结果缓存给兜底轮询用。
- *   失败（Wayland 会话没有 X11 套接字、Xauthority 不可读、协议解析异常）时 `get()` 返回 null，
- *   调用方回退到 Electron 的原生 API——行为与改造前完全一致，不会更糟。
- *
- * 坐标系：QueryPointer 返回的是**物理像素**；Electron 的 `win.getBounds()` 是 DIP。
- *   缩放不为 1 时由调用方除以 `screen.getPrimaryDisplay().scaleFactor`（见 main.js 的 currentPointer）。
- *
- * 为什么不用现成工具：xdotool 不是各发行版必备（本机就没有），python3-xlib 同样不是；
- *   而这点协议用 100 行纯 JS 就能讲清楚，不给用户增加任何安装步骤。
- *
- * 跑法（自检）：node -e "require('./x11-pointer.js').probe().then(console.log)"
+ * Linux 专用：X11 指针位置查询（纯 Node，无原生模块、不依赖外部命令）。
+ * 穿透窗收不到鼠标事件，而 Linux/X11 上 screen.getCursorScreenPoint() 返回的是 Chromium 缓存的最后一个
+ * 鼠标事件位置——建窗后就冻结，兜底轮询拿着陈旧坐标算，宠物永远翻不成可交互。这里直接走 X11 协议：
+ * 连接握手（Xauthority 的 MIT-MAGIC-COOKIE-1）与 QueryPointer，失败时 get() 返回 null 由调用方回退
+ * 原生 API。QueryPointer 返回物理像素，缩放不为 1 时由调用方除以 scaleFactor。
+ * @module dsh-pet/runtime/electron-helper/x11-pointer
  */
 const net = require('node:net');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-/** X11 协议里屏幕根的 QueryPointer 请求长度（opcode + pad + length + window） */
+/** X11 协议里屏幕根的 QueryPointer 请求（opcode 38） */
 const QUERY_POINTER = 38;
 /** QueryPointer 应答固定 32 字节 */
 const REPLY_BYTES = 32;
@@ -101,7 +83,7 @@ function connect(display) {
   });
 }
 
-/** 在 setup 应答体里定位第一块屏幕的根窗口。偏移 0/16 两种都试：实测个别服务器多 16 字节前缀 */
+/** 在 setup 应答体里定位第一块屏幕的根窗口。偏移 0/16 两种都试：个别服务器多 16 字节前缀 */
 function parseRoot(body) {
   const pad = (n) => (4 - (n % 4)) % 4;
   for (const start of [0, 16]) {
@@ -181,9 +163,9 @@ function handshake(display) {
 /**
  * 创建一个轮询式的指针提供者。
  *
- * @param {{ intervalMs?: number, display?: string }} [options]
- * @returns {{ get: () => {x:number,y:number}|null, start: () => void, stop: () => void, probe: () => Promise<{x:number,y:number}> }}
- *   `get()` 返回最近一次成功查询的坐标（物理像素），尚未成功过则为 null。
+ * @param options.intervalMs - 查询间隔（默认 60ms）。
+ * @param options.display - X display（默认取 DISPLAY）。
+ * @returns get 返回最近一次成功查询的坐标（物理像素，尚未成功过为 null），以及 start/stop/probe。
  */
 function createLinuxPointer(options = {}) {
   const intervalMs = options.intervalMs ?? 60;

@@ -1,4 +1,12 @@
-/** Local-only settings shell; external same-origin assets keep CSP free of unsafe-inline. */
+/**
+ * 本机设置页的三份静态资源：HTML、CSS 与脚本。
+ *
+ * 只在本机回环上由 ./server 提供；不包含构建步骤，也不依赖外部 CDN。
+ * 必须始终成立：脚本从地址片段读一次令牌后立刻清掉片段；页面不内联脚本与样式，
+ * 以便 CSP 保持 default-src 'none'。
+ * @module dsh-pet/src/standalone/settings-page
+ */
+/** 设置页 HTML。 */
 export const settingsPage = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>桌宠 AI 设置</title><link rel="stylesheet" href="/standalone-ai/settings.css">
@@ -28,6 +36,7 @@ export const settingsPage = `<!doctype html>
 <p id="status" role="status" aria-live="polite">正在读取本机设置…</p>
 </form><noscript>需要启用 JavaScript 才能保存设置。请从桌宠菜单打开本页。</noscript></main></body></html>`;
 
+/** 设置页样式。 */
 export const settingsStyle = `
 :root{color-scheme:light;--ink:#203b4b;--muted:#526a78;--blue:#12618b;--line:#cbdce5;--paper:#fff;--water:#edf5fa}
 *{box-sizing:border-box}body{margin:0;background:var(--water);color:var(--ink);font:16px/1.6 "Microsoft YaHei UI","PingFang SC",sans-serif}
@@ -37,6 +46,7 @@ form{background:var(--paper);border:1px solid var(--line);border-radius:16px 16p
 @media(max-width:560px){main{margin:24px auto;padding:0 14px 24px}header{padding:0 8px 24px}h1{font-size:28px}form{padding:24px 20px 16px}.pair{grid-template-columns:1fr;gap:0}footer{align-items:stretch;flex-direction:column}button{width:100%}.fish{margin-bottom:18px}}
 `;
 
+/** 设置页脚本；令牌只存在内存，请求时放进自定义头。 */
 export const settingsScript = `
 'use strict';
 (() => {

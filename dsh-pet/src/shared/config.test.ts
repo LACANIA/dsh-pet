@@ -1,14 +1,12 @@
 /**
- * 成品 → 渲染列表的契约测试：条目级字段只有**一处**填充点（flattenConfigPets）。
+ * 成品 → 渲染列表的契约测试：条目级字段只有一处填充点（flattenConfigPets）。
  *
- * 背景：animations / animationWeights / eventsRefreshSec / physics / confineToScreen / workStatusTexts /
- * whisperModel / chatModel 这八个条目级字段
- * 必须由 flattenConfigPets 从「条目」吹进每只实例。客户端曾经还有第二份手抄的填充——设置页保存后把
- * 可编辑的裸实例列表回推给容器时"补吹"一遍——它漏掉了 physics：新增宠物或同步后该实例的
- * physics 是 undefined，拖拽跟手第一帧读 cfg.physics.throwPower 直接抛错（表现为宠物完全拖不动）。
- * 现在设置页改用 host 写接口返回的成品聚合重新拍平，第二份实现已删除（见 petBridge.reload）。
- * 本文件把这条不变式钉住：
- *   ① 成品经 flattenConfigPets 后，每只实例的条目级字段齐全（可执行的契约，用真实内置默认配置）；
+ * 背景：animations / animationWeights / eventsRefreshSec / physics / confineToScreen /
+ * workStatusTexts / whisperModel / chatModel 这八个条目级字段必须由 flattenConfigPets 从
+ * 「条目」写进每只实例；客户端不得再有第二份填充（第二份会漏字段，例如 physics 缺失时
+ * 拖拽第一帧读 cfg.physics.throwPower 直接抛错）。设置页现在用 host 写接口返回的成品聚合
+ * 重新拍平。本文件把这条不变式钉住：
+ *   ① 成品经 flattenConfigPets 后，每只实例的条目级字段齐全（用真实内置默认配置）；
  *   ② 客户端不得再出现"手抄条目级字段"的填充、host 写接口必须返回成品聚合（源码级守卫——
  *      src/client/pet.ts 依赖 React/DOM，无法在 node 中导入，只能读源码断言）。
  *
@@ -115,7 +113,7 @@ describe('flattenConfigPets —— 成品 → 渲染列表的唯一填充点', (
     //    响应直接拍平，不自己拼字段，也不再补一次 GET（补拉的那一次可能拿到陈旧配置）
     const returns = host.match(/obj: readAllConfig\(configPaths\)/g) ?? [];
     assert.equal(returns.length, 4, 'GET / PUT / POST /config 与 POST /pet-display 都应返回成品聚合');
-    // 只扫 /config 那一段：动作端点（POST /balance 等）返回 { ok: true } 是**对的**（动作不带数据，
+    // 只扫 /config 那一段：动作端点（POST /balance 等）返回 { ok: true } 是对的（动作不带数据，
     // 数据只有 /state 一个出口），全文件扫描会把它们误判成"config 写接口返回了 ok:true"。
     const configBlock = /if \(rest === 'config'\) \{([\s\S]*?)\n {4}\}/.exec(host)?.[1] ?? '';
     assert.ok(configBlock.length > 0, '必须能定位到 /config 路由段（守卫失效即无意义）');
@@ -124,21 +122,21 @@ describe('flattenConfigPets —— 成品 → 渲染列表的唯一填充点', (
       'config 写接口不得再返回 { ok: true }：响应体必须是成品聚合（设置页即时生效靠它拍平）',
     );
     // ④ 保存的「透传保留」必须用 JSONC 容忍解析器读用户层：用户层可能是「同步」写入的
-    //    **带 // 注释的 config.jsonc 原文**，严格 JSON.parse 会抛错并被 catch 吞掉 →
+    //    带 // 注释的 config.jsonc 原文，严格 JSON.parse 会抛错并被 catch 吞掉 →
     //    existing 变 undefined → 白名单重建 → 用户手改的高级字段（animations/physics/memes…）
-    //    全部丢失。这是曾经修过、又被「同步」带回来的回归，必须钉住。
+    //    全部丢失。这条回归必须钉住（同步写入用户层时不得丢高级字段）。
     assert.ok(/readUserConfig\(configPaths\)/.test(host), 'PUT /config 必须用 readUserConfig 读用户层（JSONC 容忍）');
     assert.ok(
       !/JSON\.parse\(await readFile\(userConfigPath/.test(host),
       '不得用严格 JSON.parse 读用户层：带注释的配置会解析失败，保存时静默丢掉全部高级字段',
     );
-    // ⑤ 保存前必须有损坏预检：用户层解析不了时**先不写盘**，回 409 让设置页弹窗
+    // ⑤ 保存前必须有损坏预检：用户层解析不了时先不写盘，回 409 让设置页弹窗
     //    （取消 = 不动文件 / 确认 = 强行重建）。没有它就会出现"损坏 → 静默白名单重建 → 配置全丢"。
     assert.ok(
       /userConfigUnparsable\(configPaths\)/.test(host),
       'PUT /config 必须先做损坏预检（userConfigUnparsable），损坏时回 409 而不是静默重建',
     );
-    // ⑥ 前端不得把带默认参数的 handler **直接**交给 React：`onClick: save` 会让 React 把
+    // ⑥ 前端不得把带默认参数的 handler 直接交给 React：`onClick: save` 会让 React 把
     //    MouseEvent 当第一个实参传进去 → save(force) 里的 force 成了真值 → 每次保存都拼
     //    ?force=1 → 宿主的损坏预检被绕过 → 静默白名单重建、字段全丢、永不弹窗（真实事故）。
     //    所以：onClick 必须包一层，且 force 只认严格 true。
@@ -150,10 +148,10 @@ describe('flattenConfigPets —— 成品 → 渲染列表的唯一填充点', (
       /force === true \? '\?force=1'/.test(clientSettings),
       'force 必须严格比较 true（真值判断会让任何实参都开启强行覆盖）',
     );
-    // ⑦ 系统通知开关必须与其余三个全局开关**同构**：只改本地状态、随「保存」写入。
-    //    它曾经是唯一即时写盘的开关（toggleNotify 里直接 PUT /config），而 PUT /config 会让宿主
-    //    重启桌面 Helper（全部桌面宠物窗口重建：拖拽落点清空、宠物跳回配置角落）——于是
-    //    "改个通知开关，桌面被重置"，与其它开关行为不一致（真实反馈）。写盘只允许出现在 save() 里。
+    // ⑦ 系统通知开关必须与其余三个全局开关同构：只改本地状态、随「保存」写入。
+    //    即时写盘（toggleNotify 里直接 PUT /config）会让宿主重启桌面 Helper（全部桌面宠物窗口重建：
+    //    拖拽落点清空、宠物跳回配置角落）——"改个通知开关，桌面被重置"，与其它开关行为不一致。
+    //    写盘只允许出现在 save() 里。
     const toggle = /const toggleNotify = async[\s\S]*?\n {4}\};/.exec(clientSettings);
     assert.ok(toggle, '设置页必须有 toggleNotify（系统通知开关）');
     assert.ok(
@@ -164,8 +162,8 @@ describe('flattenConfigPets —— 成品 → 渲染列表的唯一填充点', (
       /notificationsEnabled: notifyEnabled/.test(clientSettings),
       '「保存」的请求体必须带上通知开关（否则切了开关点保存也不生效）',
     );
-    // ⑧ 物理参数（设置页「物理」区）必须真的提交：physics 原先**不在白名单**里（只在 existing 里
-    //    透传），前端就算把输入框画出来、改了值，写盘时也会被丢弃。守卫两侧：
+    // ⑧ 物理参数（设置页「物理」区）必须真的提交：physics 必须在白名单里（只在 existing 里
+    //    透传时，前端就算把输入框画出来、改了值，写盘时也会被丢弃）。守卫两侧：
     //    「保存」请求体必须带 physics；宿主必须用同一份 physicsValid 整段校验它。
     //    取请求体字面量再找键（不写死 `physics: physics`：打包器会把同名简写压成 `physics,`）。
     const saveBody = /const body: Record<string, unknown> = \{([\s\S]*?)\n {8}\};/.exec(clientSettings);

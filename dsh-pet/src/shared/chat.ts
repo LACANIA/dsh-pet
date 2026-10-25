@@ -1,26 +1,21 @@
-// 对话输入弹窗（src/shared，浏览器 bundle 与桌面 shared-core 共用）：
-//  - 纯逻辑：类型 / 发送（走 host /dsh-pet-7340/chat，host 是 memory.json 唯一读写方
-//    —— 浏览器与桌面同一实例天然共享同一份记忆，两端只是不同显示方式）；
-//  - CHAT_CSS + mountChatDialog：自 menu.ts 之后第二个「两端共用同一份 DOM」例外
-//    （菜单组件证明可行的模式：浏览器页面与桌面透明窗渲染完全一致的对话框）。
-// 交互语义（与碎碎念同一显示效果，只多一步用户输入）：
-//    右键菜单「对话」→ 极简输入框 + 确认 → 点确认后弹窗消失 →
-//    桌宠把回复用碎碎念同款方式展示（说话动画 + 白色气泡 10s 消失）。
-//  **回复由 S 的 pets.<id>.say 带回展示**：POST /chat 成功时响应里也有正文
-//    （`{ok,text,image?}`，与写进叶子的同一份），但本组件**不用**它——回复统一走
-//    /state 轮询展示，onSent 只用来叫醒一拍，让结果 0 延迟可见（见各端实现）。
-// 记忆语义：memory.json 全存不删；host 每次请求只截尾部 chatMemoryRounds 轮进上下文。
+/**
+ * 对话输入弹窗：两端共用同一份 DOM 与交互。
+ * 发送走宿主半侧的 /chat，记忆只由宿主读写，所以浏览器与桌面天然共享同一份记忆。
+ * 回复不经响应回传展示：POST 的响应里也有正文，但本组件不用它——回复统一从 /state 的
+ * pets.<id>.say 走气泡展示，onSent 只用来催促调用方取一拍。
+ * 不负责生成、记忆策略与气泡渲染。
+ * @module dsh-pet/src/shared/chat
+ */
 
-/** POST /dsh-pet-7340/chat?pet=<id> {text}：回执为 `{ok,text,image?}`；本类型只声明消费方
- *  用到的 `ok`（正文展示一律走 /state 的 pets.<id>.say） */
+/** 发送回执：本类型只声明消费方用到的 ok，正文展示一律走 /state 的 pets.<id>.say。 */
 export type ChatSendState =
   | { ok: true }
   | { ok: false; reason: 'provider-missing' | 'generate-error' | 'config-error' | 'bad-request'; message?: string };
 
 const SEND_TIMEOUT_MS = 60_000; // 对话要等 LLM 生成回复，比碎碎念（30s）放宽一倍
 
-/** 发送一句对话（携带记忆去 host 生成回复并写入记忆）。
- *  网络/解析失败显式抛错（调用方决定报错方式，绝不静默伪造）。 */
+/** 发送一句对话（携带记忆去宿主生成回复并写入记忆）。
+ *  网络或解析失败显式抛错，调用方决定报错方式，绝不静默伪造回复。 */
 export async function sendChat(baseUrl: string, text: string): Promise<ChatSendState> {
   const res = await fetch(baseUrl, {
     method: 'POST',
@@ -44,18 +39,16 @@ export async function sendChat(baseUrl: string, text: string): Promise<ChatSendS
   return { ok: true };
 }
 
-/** 弹窗样式 —— 两端注入同一份（与菜单 MENU_CSS 同理；视觉对齐浏览器/桌面）。
- *  最简形态：一条自适应输入框（无标题/无按钮）——初始小宽度（160px），
- *  随输入自动增宽（封顶 340px），到上限后自动折行增高；回车发送，Esc 或点外关闭。
- *  宽度由 JS 按文本测量覆盖根元素宽度。 */
+/** 弹窗样式 —— 两端注入同一份。
+ *  一条自适应输入框（无标题、无按钮）：初始 160px，随输入增宽、封顶 340px 后折行增高；
+ *  回车发送，Esc 或点外关闭。宽度由 JS 按文本测量覆盖根元素宽度。 */
 export const CHAT_CSS = [
   '.dsh-pet-chat{position:fixed;z-index:2147483001;width:160px;max-width:80vw;',
   'background:rgba(255,255,255,.98);border:1px solid rgba(0,0,0,.12);border-radius:10px;',
   'box-shadow:0 10px 32px rgba(0,0,0,.22);color:#2b2b2b;font-size:14px;line-height:1.5;',
   // 字体与桌宠气泡同款（上首软糖体，两端均已注入 @font-face），风格一致不显正式。
-  // 字体族走全局配置变量 --dsh-pet-font-family：弹窗挂在 body 下、继承不到宠物根容器，
-  // 所以由两端注入在 documentElement（回退参数 = 改造前的原栈）。
-  // 字号保持固定 14px：配置里的 font.size 只作用于气泡与悬浮提示，不改变本弹窗。
+  // 字体族走全局配置变量 --dsh-pet-font-family：弹窗挂在 body 下、继承不到宠物根容器，由两端注入在 documentElement。
+  // 字号保持固定 14px：配置里的 font.size 只作用于气泡与悬浮提示。
   "font-family:var(--dsh-pet-font-family,'ShangshouSoftCandy','Yuanti SC','YouYuan','幼圆','Comic Sans MS','PingFang SC','Microsoft YaHei',sans-serif);",
   'user-select:none}',
   '.dsh-pet-chat *{box-sizing:border-box}',
@@ -67,7 +60,7 @@ export const CHAT_CSS = [
   '.dsh-pet-chat-err{color:#d94f3d;font-size:12px;padding:0 12px 8px;white-space:pre-wrap;overflow-wrap:anywhere}',
 ].join('');
 
-/** 输入框宽度自适应参数：初始小宽 → 随文本增宽 → 封顶后折行增高 */
+/** 输入框宽度自适应参数：初始小宽，随文本增宽，封顶后折行增高。 */
 const CHAT_MIN_W = 160;
 const CHAT_MAX_W = 340;
 const CHAT_H_PAD = 22; // 输入框水平 padding（11×2），宽度测量补偿
@@ -83,7 +76,7 @@ function injectChatCss(): void {
   document.head.appendChild(tag);
 }
 
-/** mountChatDialog 返回值 */
+/** 对话弹窗挂载句柄。 */
 export interface ChatDialogMount {
   /** 根元素（document.body 下） */
   el: HTMLElement;
@@ -92,24 +85,19 @@ export interface ChatDialogMount {
 }
 
 /** 挂载一个对话输入弹窗（两端共用；位置为视口坐标，超出 clamp 矩形自动夹回）。
- *  最简形态：只有一条输入框（无标题/无按钮），回车即发送 → 弹窗关闭 →
- *  onSent() 交给调用方叫醒一拍 /state（回复写进了 pets.<id>.say，气泡随下一拍出现）；
- *  Esc / 点弹窗外关闭；生成失败则留在弹窗内显式提示，不伪造回复。
- *
- *  clamp（可选，#41）：弹窗允许占用的矩形（视口局部坐标，默认整个视口）。
- *  桌面模式传「窗口 ∩ 工作区」——宠物贴屏幕底/右时窗口外扩余量伸出屏幕，
- *  约束到该矩形内即可完整显示，**窗口/宠物零移动零闪帧**。 */
+ *  只有一条输入框，回车即发送：发送成功后弹窗关闭并调 onSent——回复写进了 pets.<id>.say，
+ *  气泡随下一拍出现。Esc 或点弹窗外关闭；生成失败留在弹窗内显式提示，不伪造回复。
+ *  clamp 是弹窗允许占用的矩形（视口局部坐标，默认整个视口）。桌面传「窗口 ∩ 工作区」——
+ *  宠物贴屏幕底或右时窗口外扩余量伸出屏幕，约束进去即可完整显示，窗口与宠物零移动。 */
 export function mountChatDialog(opts: {
   petId: string;
-  /** 端点基址：浏览器默认相对 /dsh-pet-7340/chat；桌面传绝对 URL（file:// 页面需绝对） */
+  /** 端点基址：浏览器默认相对路径，桌面传绝对 URL（file:// 页面需要绝对） */
   baseUrl?: string;
-  /** 这个弹窗开在**哪一端**：`POST /chat` 的 `?surface=` 是必填的（宿主据此把"必然不可能"提前
-   *  拒掉，见 src/host/surface.ts）。弹窗只可能开在网页或桌面，所以这里只有两个取值。 */
+  /** 这个弹窗开在哪一端：POST /chat 的 ?surface= 是必填的，宿主据此提前拒掉不可能的组合。 */
   surface: 'web' | 'desktop';
   x: number;
   y: number;
-  /** 发送成功后调用（弹窗此时已关闭）：调用方叫醒一拍 /state 让回复 0 延迟出现。
-   *  回复本身不从这里回传——它走 S（动作端点不回数据，数据只有一个出口）。 */
+  /** 发送成功后调用（弹窗此时已关闭）：回复本身不从这里回传，数据只有 /state 一个出口。 */
   onSent?: () => void;
   onClose?: () => void;
   /** 弹窗允许占用的矩形（视口局部坐标）；缺省 = 整个视口 */

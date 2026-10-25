@@ -7,7 +7,7 @@
  * 不该由一只宠物的托盘决定，所以菜单项在那边不出现。
  *
  * 这里钉住三件事：
- *   ① 能力按**请求时**判定：ctx 上没有 shutdownApp → canQuit:false，且 POST 不触发任何停机；
+ *   ① 能力按请求时判定：ctx 上没有 shutdownApp → canQuit:false，且 POST 不触发任何停机；
  *   ② 有该能力 → canQuit:true，POST 触发且 reason 正确；
  *   ③ 桌面端接线（源码守卫）：BRIDGE 下不得自己退，必须 POST /quit；退出不得调 syncDesktop。
  *
@@ -79,7 +79,7 @@ before(() => {
   let handler: ((req: unknown, res: unknown) => Promise<void>) | undefined;
   const noop = (): void => {};
   hostCtx.shutdownApp = shutdownSpy;
-  // 必须与 hostCtx 是**同一个引用**（不能展开成新对象）：用例之间要 delete 掉 shutdownApp，
+  // 必须与 hostCtx 是同一个引用（不能展开成新对象）：用例之间要 delete 掉 shutdownApp，
   // 验证 /quit 是「请求时判定」而不是 apply 时就把能力固定死。
   Object.assign(hostCtx, {
     effect: (fn: () => unknown) => {

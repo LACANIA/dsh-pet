@@ -4,6 +4,7 @@
 // 忽略：构建产物 lib、发布前检查脚本 scripts、素材 assets（类型正确性交给 tsc，
 //       因此 TS 文件关闭 no-undef，避免 window/fetch 等全局误报）
 import js from '@eslint/js';
+import jsdoc from 'eslint-plugin-jsdoc';
 import tseslint from 'typescript-eslint';
 import reactHooks from 'eslint-plugin-react-hooks';
 
@@ -26,6 +27,24 @@ export default tseslint.config(
     rules: {
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
+    },
+  },
+  {
+    // 注释门禁（warn）：只校验已有 JSDoc 的格式与参数名，不强制每个符号都写注释，
+    // 因此不阻塞构建；稳定后再考虑升 error 或补 require-jsdoc。
+    // TSDoc 的 @typeParam / @remarks / @internal / @module 不是 JSDoc 内置标签，需显式登记。
+    files: ['src/**/*.ts'],
+    ignores: ['src/**/*.test.ts'],
+    plugins: { jsdoc },
+    settings: {
+      jsdoc: { definedTags: ['typeParam', 'remarks', 'internal', 'module'] },
+    },
+    rules: {
+      'jsdoc/check-tag-names': 'warn',
+      // 解构参数（{ a, b }）不展开成 a、b 两个参数名，否则全是误报。
+      'jsdoc/check-param-names': ['warn', { checkDestructured: false, checkRestProperty: false }],
+      'jsdoc/require-param-description': 'warn',
+      'jsdoc/require-returns-description': 'warn',
     },
   },
   {

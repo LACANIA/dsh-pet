@@ -2,9 +2,9 @@
  * 抛掷指令的初速换算单元测试 —— 钉住 `POST /throw` 文档里那张表。
  *
  * 为什么单独钉：契约里写死了两件容易被无声改掉的事——
- *   1. **角度方向**：`0` = 正右、**逆时针为正**（屏幕坐标 y 向下，所以 `vy` 取负号）。
+ *   1. 角度方向：`0` = 正右、逆时针为正（屏幕坐标 y 向下，所以 `vy` 取负号）。
  *      搞反了第三方会发现"往上抛"变成了往下砸，而代码本身不会报任何错；
- *   2. **力度锚点**：`power = 1.0` 对应软钳速**前**的 1200 px/s，实际初速约 1021 px/s。
+ *   2. 力度锚点：`power = 1.0` 对应软钳速前的 1200 px/s，实际初速约 1021 px/s。
  *      调一下锚点或限速公式，文档里的数字就成假话了。
  *
  * 跑法：node --experimental-strip-types --test src/shared/physics.test.ts
@@ -99,12 +99,10 @@ describe('softClampSpeed —— 抛掷指令与拖拽甩抛共用同一条限速
 
   test('渐近不超过 MAX_THROW_SPEED（极大输入下取等号，不是超过）', () => {
     assert.ok(softClampSpeed(MAX_THROW_SPEED) < MAX_THROW_SPEED);
-    // exp(-1000) 在 float64 下下溢成 0，所以这里会**恰好**取到上限——契约是"不超过"，取等合法
+    // exp(-1000) 在 float64 下下溢成 0，所以这里会恰好取到上限——契约是"不超过"，取等合法
     assert.equal(softClampSpeed(MAX_THROW_SPEED * 1000), MAX_THROW_SPEED);
   });
 });
-
-// ---- 弹弓（双击第二下按住拖）：方向是拉的反方向，力度是拉距且不设上限 ----
 
 describe('pullAngle —— 弹射方向是拉的**反方向**', () => {
   test('往左拉 → 正右（0°，与 throwVelocity 的「0 = 正右」同一套）', () => {

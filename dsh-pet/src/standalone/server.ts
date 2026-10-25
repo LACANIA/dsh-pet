@@ -1,4 +1,11 @@
-/** Standalone loopback HTTP boundary. Desktop bridge requests never pass through this listener. */
+/**
+ * 独立模式的回环 HTTP 边界：静态设置页、设置读写、停机与插件路由分发。
+ *
+ * 不实现插件业务路由，只按前缀把请求交给 apply 注册的 handler；桌面桥请求不经过这里。
+ * 依赖 ./request-security 的访问校验与 ./request-body 的正文边界。
+ * 必须始终成立：只监听 127.0.0.1，任何错误响应都不回显服务商细节。
+ * @module dsh-pet/src/standalone/server
+ */
 import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
@@ -10,29 +17,45 @@ import { publicSettings, validateSettings } from './settings';
 import type { StandaloneSettingsService } from './settings';
 import { settingsPage, settingsScript, settingsStyle } from './settings-page';
 
+/** 默认监听端口。 */
 export const DEFAULT_STANDALONE_PORT = 3080;
+/** 端口被占用时最多向后顺延的次数。 */
 export const PORT_SCAN_LIMIT = 25;
+/** 启动选项。 */
 export interface StandaloneServerOptions {
+  /** 插件注册的路由。 */
   routes: RegisteredRoute[];
+  /** 日志出口。 */
   logger: StandaloneLogger;
+  /** 首选端口。 */
   port?: number;
+  /** 健康检查返回的状态。 */
   status?: () => unknown;
+  /** 停机回调。 */
   onShutdown?: () => void;
+  /** 访问校验门面。 */
   security?: RequestSecurity;
+  /** 设置服务。 */
   ai?: StandaloneSettingsService;
-  /** Override only for deterministic timeout tests. */
+  /** 正文读取时限，仅供超时测试覆盖。 */
   bodyTimeoutMs?: number;
 }
+/** 已启动的服务。 */
 export interface StandaloneServer {
+  /** 实际监听端口。 */
   port: number;
+  /** 本次运行的访问校验门面。 */
   security: RequestSecurity;
+  /** 关闭监听并断开在途连接。 */
   close(): Promise<void>;
 }
 
+/** 前缀路由匹配：exact 只比全等，prefix 允许后接子路径。 */
 function matches(route: RegisteredRoute, pathname: string): boolean {
   if (route.kind === 'exact') return pathname === route.path;
   return pathname === route.path || pathname.startsWith(`${route.path}/`);
 }
+/** 回 JSON；探针允许跨域读取。 */
 function sendJson(res: ServerResponse, status: number, body: unknown, cors = false): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -42,6 +65,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown, cors = fal
   });
   res.end(payload);
 }
+/** 回静态资源，附带只允许同源脚本与样式的 CSP。 */
 function sendAsset(res: ServerResponse, body: string, type: string): void {
   res.writeHead(200, {
     'content-type': `${type}; charset=utf-8`,
@@ -52,16 +76,18 @@ function sendAsset(res: ServerResponse, body: string, type: string): void {
   });
   res.end(body);
 }
+/** 记录并回一个不含细节的 500。 */
 function fail(res: ServerResponse, _error: unknown, logger: StandaloneLogger): void {
-  // Never echo or log provider errors: they may contain API keys or credential-bearing URLs.
+  // 绝不回显或记录服务商错误：其中可能有 API 密钥或带凭据的地址。
   logger.error('独立模式路由处理失败（详细内容已省略以保护凭据）');
   if (res.headersSent) res.destroy();
   else sendJson(res, 500, { error: '本机服务暂时无法处理请求' });
 }
 
 /**
- * AI 设置读写处理器（GET 读 / POST 存）。
- * 导出给单进程应用入口复用：应用与 CLI 共用同一份「校验 + 限流 + 原子写」逻辑，不复制。
+ * 创建设置读写处理器（GET 读，POST 存）。
+ * @param ai - 设置服务。
+ * @returns 处理请求的异步函数。
  */
 export function settingsHandler(
   ai: StandaloneSettingsService | undefined,
@@ -86,6 +112,7 @@ export function settingsHandler(
       count = 0;
     }
     count += 1;
+    // 保存是重操作，按一分钟窗口限流，避免设置页反复重试打爆磁盘。
     if (count > 20) {
       rejectRequest(res, 429, '保存过于频繁，请稍后再试');
       return;
@@ -109,7 +136,11 @@ export function settingsHandler(
   };
 }
 
-/** 连通性测试处理器（POST）。同样导出给应用入口复用。 */
+/**
+ * 创建连通性测试处理器（POST）。
+ * @param ai - 设置服务。
+ * @returns 处理请求的异步函数。
+ */
 export function testHandler(
   ai: StandaloneSettingsService | undefined,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
@@ -139,6 +170,7 @@ export function testHandler(
   };
 }
 
+/** 组装请求分发器：先处理探针、设置页与停机，再交给插件路由。 */
 function dispatch(
   options: StandaloneServerOptions,
   shutdownSecurity?: RequestSecurity,
@@ -218,6 +250,12 @@ function dispatch(
   };
 }
 
+/**
+ * 创建 HTTP 请求监听器。
+ * @param options - 启动选项。
+ * @param injectedSecurity - 注入的访问校验。
+ * @returns 监听器。
+ */
 export function createRequestListener(
   options: StandaloneServerOptions,
   injectedSecurity?: RequestSecurity,
@@ -234,10 +272,11 @@ export function createRequestListener(
     }
     secureResponse(res, pathname);
     if (security && !security.authorize(req, res)) return;
-    // Do not log paths, fragments, query parameters, request bodies or authorization headers.
+    // 不记录路径、片段、查询、正文与鉴权头，避免把令牌写进日志。
     options.logger.debug('收到本机 HTTP 请求');
     const hasBody = req.headers['transfer-encoding'] !== undefined || Number(req.headers['content-length'] ?? 0) > 0;
     const bodyMethod = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method ?? '');
+    // 有正文或写方法都要先走有界读取，避免插件自己无限读。
     if ((hasBody || bodyMethod) && typeof req.on === 'function') {
       const limit = pathname === '/standalone-ai/settings' ? MAX_SETTINGS_BYTES : MAX_REQUEST_BYTES;
       void boundedRequest(req, res, limit, options.bodyTimeoutMs)
@@ -249,6 +288,7 @@ export function createRequestListener(
   };
 }
 
+/** 从首选端口起逐个尝试，只接受 EADDRINUSE 后继续。 */
 async function bindFirstFree(server: HttpServer, preferred: number, logger: StandaloneLogger): Promise<number> {
   for (let port = preferred; port < preferred + PORT_SCAN_LIMIT; port += 1) {
     try {
@@ -267,6 +307,7 @@ async function bindFirstFree(server: HttpServer, preferred: number, logger: Stan
       });
       const address = server.address();
       const bound = typeof address === 'object' && address !== null ? address.port : port;
+      // 端口顺延时提示一次，读者才知道最终地址与请求的不同。
       if (preferred > 0 && bound !== preferred) logger.warn(`端口 ${preferred} 被占用，改用 ${bound}`);
       return bound;
     } catch (error) {
@@ -275,6 +316,12 @@ async function bindFirstFree(server: HttpServer, preferred: number, logger: Stan
   }
   throw new Error(`从 ${preferred} 起连续 ${PORT_SCAN_LIMIT} 个端口都被占用`);
 }
+/**
+ * 创建并启动本机服务。
+ * @param options - 启动选项。
+ * @returns 已监听的服务。
+ * @throws 连续多个端口都被占用时抛出。
+ */
 export async function listenStandaloneServer(options: StandaloneServerOptions): Promise<StandaloneServer> {
   const security = options.security;
   const server = createServer(createRequestListener(options, security));

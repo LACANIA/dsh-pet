@@ -1,15 +1,9 @@
 /**
- * dsh-pet desktop helper —— 点击穿透「兜底通道」的纯判定（issue #55 报告者补丁的逻辑部分）。
- *
- * 背景：窗口默认整窗点击穿透（`setIgnoreMouseEvents(true, { forward: true })`），只靠 Electron 的
- * forward 低级鼠标钩子把 mousemove 转发进渲染端，渲染端再做命中判定并 IPC 回来翻转可交互——
- * **整条链路只有一个入口**。该钩子在 Windows 上会静默失效（回调超时被系统摘掉、或被其它软件的
- * 钩子干扰），失效后没有任何退路：光标悬浮不触发手套光标、拖不动、点击与右键全无反应。
- *
- * 这里把「按真实光标位置决定要不要可交互」抽成纯函数：不 require('electron')，可被 node:test
- * 直接加载单测。主进程侧只负责 60ms 轮询取光标 + 调用本函数 + 翻转窗口。
- *
- * 坐标系：全部用 DIP（`win.getBounds()` 与 `screen.getCursorScreenPoint()` 同为 DIP，可比）。
+ * 点击穿透兜底通道的纯判定（不 require electron，可被 node:test 直接加载）。
+ * 窗口默认整窗穿透，常规链路只有 Electron 的 forward 鼠标钩子一个入口，而该钩子在 Windows 上会静默失效
+ * ——失效后悬浮、拖拽、点击与右键全无反应。本模块只算「该不该可交互」，主进程负责取光标并翻转窗口；
+ * 坐标一律 DIP（窗口矩形与光标同单位）。
+ * @module dsh-pet/runtime/electron-helper/pointer-target
  */
 
 'use strict';
@@ -23,16 +17,12 @@ const FEET_Y = 330;
 
 /**
  * 窗口矩形 → 宠物身体命中区的屏幕矩形（DIP）。
- * 窗口 = 宠物包围盒 + 四周余量（渲染端 sprite.js 的 this.margin）：横向 `margin.l`、纵向 `margin.t`，
- * stageW = width − 2×margin.l。
  *
- * **余量不再四边相等**：上边距按气泡最大高度加高（见 shared/fonts.ts 的 bubbleTopMarginPx），
- * 所以不能再按「窗口宽 / 4」反推——那会把命中区整体下移/上移一个 (margin.t − margin.l)。
- * 余量由渲染端随 setBounds 上报（preload → main 的 winMargins）；缺失时（旧渲染端/单测）
- * 回退旧口径 width / 4，行为与改造前一致。
+ * 窗口 = 宠物包围盒 + 四周余量，而余量不再四边相等（上边距按气泡最大高度加高），所以不能按
+ * 「窗口宽/4」反推，否则命中区整体偏移。余量由渲染端随 setBounds 上报，缺失时回退旧口径。
  *
- * @param {{x:number,y:number,width:number,height:number}} bounds 窗口矩形（DIP）
- * @param {{l:number,t:number}} [margins] 渲染端上报的窗口余量（DIP）
+ * @param bounds - 窗口矩形（DIP）。
+ * @param margins - 渲染端上报的窗口余量（DIP）。
  */
 function spriteHitRect(bounds, margins) {
   const legacy = Math.round(bounds.width / 4);
@@ -49,7 +39,7 @@ function spriteHitRect(bounds, margins) {
   };
 }
 
-/** 判定轮询间隔（ms，与 issue #55 报告者实测值一致） */
+/** 判定轮询间隔（ms） */
 const POINTER_POLL_MS = 60;
 
 /** 光标停在窗口余量区（非 busy）的最长保持时间（ms）：超过即恢复穿透 */
@@ -58,12 +48,12 @@ const OFF_BODY_RELEASE_MS = 400;
 /**
  * 光标相对窗口的分区：'outside' | 'body' | 'margin'。
  *
- * 主进程除判定外还要按分区累计余量区停留时长，判定区域只在此处维护，避免两条通道漂移。
+ * 主进程除判定外还要按分区累计余量区停留时长；分区规则只在此处维护，避免两条通道漂移。
  *
- * @param {{x:number,y:number,width:number,height:number}} bounds 窗口矩形（DIP）
- * @param {{x:number,y:number}} point 真实光标位置（DIP）
- * @param {{l:number,t:number}} [margins] 渲染端上报的窗口余量（DIP），见 spriteHitRect
- * @returns {'outside'|'body'|'margin'} 分区
+ * @param bounds - 窗口矩形（DIP）。
+ * @param point - 真实光标位置（DIP）。
+ * @param margins - 渲染端上报的窗口余量（DIP），见 spriteHitRect。
+ * @returns 分区。
  */
 function pointerZone(bounds, point, margins) {
   const inWindow =
@@ -78,35 +68,15 @@ function pointerZone(bounds, point, margins) {
 }
 
 /**
- * 该不该让窗口保持穿透（= `setIgnoreMouseEvents` 的第一个参数）。
+ * 该不该让窗口保持穿透（setIgnoreMouseEvents 的第一个参数）。
+ * busy 期间位置完全不参与：拖拽时宠物滞后于光标，位置判定会断掉正在用的 pointermove/pointerup。
  *
- * 规则（与 issue #55 报告者实测的表一致）：
- *  - 拖拽中 → **不穿透**，最高优先级；菜单/聊天框只让各自控件矩形接收点击；
- *  - 光标在宠物身体上 → 不穿透（可交互）；
- *  - 光标在窗口内、宠物外 → **保持当前状态**（渲染端自绘的右键菜单/对话弹窗要可点），
- *    但非 busy 且连续停留超过 OFF_BODY_RELEASE_MS 后强制恢复穿透；
- *  - 光标在窗口外 → 恢复穿透（透明像素不挡下层应用）。
- *
- * 为什么 busy 必须优先于位置判定（0.2.10 的回归）：本函数判定的是**光标与窗口矩形**的关系，
- * 而窗口矩形比宠物身体大一圈（四周各半只宠物的余量）。拖拽时宠物由 rAF 弹簧追赶光标、**滞后**于
- * 光标；甩得快时滞后量超过那一圈余量，光标就落在矩形外 → 判成"窗外" → 翻回穿透 → 渲染端正在
- * 拖拽的 window 级 pointermove/pointerup 全断（鼠标还按着，宠物却按旧速度"飞"出去；速度不是被
- * 估算出来的——收不到 pointermove 就采不到新轨迹，连松手的 pointerup 都没人报，轨迹停在最后一次
- * 采样上继续积分）。所以"正拿着输入"这件事必须能**否决**位置判定，而不是被位置判定否决。
- *
- * 位置判定里**不含**拖拽容差：一旦 busy，位置完全不参与（任何"离得近才算"的阈值都会重新引入
- * "滞后量 > 余量"这个致命条件，正是 bug 本身）。
- *
- * @param {{x:number,y:number,width:number,height:number}} bounds 窗口矩形（DIP）
- * @param {{x:number,y:number}} point 真实光标位置（screen.getCursorScreenPoint()，DIP）
- * @param {boolean} ignoring 窗口当前是否穿透（取自主进程的 windowIgnore 镜像，不用本地副本：
- *   渲染端那条通道也在翻转它，本地副本会与之失步）
- * @param {boolean} busy 渲染端是否正在用这个窗口的鼠标输入（拖拽中/菜单开/弹窗开，见 inputBusy）
- * @param {number} [offBodyMs=0] 光标在窗口余量区（非 busy）的连续停留时长，超时即恢复穿透
- * @param {{dragging:boolean, rects:Array<{x:number,y:number,width:number,height:number}>}} [input]
- *   新渲染端上报的窗口局部交互矩形。菜单/聊天框只占自己的区域；拖拽仍拥有完整输入租约。
- * @param {{l:number,t:number}} [margins] 渲染端上报的窗口余量（DIP），见 spriteHitRect
- * @returns {boolean} 新的穿透状态
+ * @param ignoring - 当前是否穿透（取自主进程镜像，避免与渲染端通道失步）。
+ * @param busy - 渲染端是否正在使用本窗口的鼠标输入。
+ * @param offBodyMs - 余量区（非 busy）的连续停留时长。
+ * @param input - 渲染端上报的控件矩形与拖拽标记。
+ * @param margins - 渲染端上报的窗口余量（DIP）。
+ * @returns 新的穿透状态。
  */
 function decideWindowIgnore(bounds, point, ignoring, busy, offBodyMs = 0, input, margins) {
   if (busy) {

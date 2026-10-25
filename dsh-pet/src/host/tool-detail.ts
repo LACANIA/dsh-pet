@@ -1,81 +1,64 @@
 /**
- * 工具调用 → 工作状态气泡里的**具体**详情（「翻翻 index.ts 看看嘛」「该推上去了吧，我来」）。
+ * 工具调用 → 工作状态气泡里的具体详情（「翻翻 index.ts 看看嘛」「该推上去了吧，我来」）。
  *
- * 设计要点（改文案时只碰数据表，不用读逻辑）：
- *   1. **文案是数据**：`TOOL_COPY`（工具 → 3 句）、`COMMAND_COPY`（命令/子命令 → 3 句）与两个
- *      兜底表。加工具、加命令、改语气 = 加一行字符串，不碰任何判定代码。
- *   2. **语气跟人设走**：与 `workStatusTexts` 同一套口吻（温柔乖巧带点俏皮，10~18 字），
- *      并且**必须带上具体对象**（文件名 / 命令名）——没有对象的气泡等于没说。
- *   3. **没有语义就不硬编**：`npm` / `python` / `node` 这类「只是跑代码」的命令不进表，
- *      走兜底「跑一下 {cmd} 咯」；`git log` / `git push` 这类有明确作用的才细化到子命令。
- *   4. **复合命令一律不猜**：含 `;` `|` `&&` `||` 换行 → 返回 null，让前端回落到
- *      `workStatusTexts` 的配置文案（`cd …; npx prettier; npx tsc` 显示「cd」是在骗人）。
- *   5. **目标太长就换短句**：目标超过 TARGET_DISPLAY_MAX（20 码点）时整句换成该工具的氛围兜底，
- *      不带文件名 / 工具名——气泡是氛围，不是信息面板（`grep` 的正则
- *      `WORK_STATE_GAP_MS|busyFlip|…` 硬塞进去会直接撑破气泡）。
- *
- * 两条刻意的取舍：
- *   - **大参数不解析**：`write` / `edit` 的 arguments 里带着整个文件内容，动辄几百 KB。
- *     超过 MAX_ARGS_CHARS 就不再 JSON.parse —— 宁可少一句气泡，也不在一个热事件里白花时间。
- *   - **命令只看命令名**：`pwsh` 的 command 里可能带 token / 内网地址，而气泡是**上屏**内容。
- *     只取第一个「像命令」的 token，参数一律不显示。
- *
- * 本模块是 host 自包含实现（不 import src/shared —— DSH 单文件加载约束）；
- * 唯一的依赖是同级的 ./work-status，只为一个常量：气泡宽度上限 TASK_TEXT_MAX。
+ * 文案是数据：加工具、加命令、改语气只加一行字符串，不碰判定代码；每句都要带具体对象（没有对象
+ * 的气泡等于没说）。不负责气泡的其他字段与档位（见 ./work-status），唯一依赖是它的长度上限 TASK_TEXT_MAX。
+ * 必须始终成立：气泡是上屏内容——命令只看命令名、参数一律不显示（可能带 token 或内网地址）；
+ * 复合命令（`;` `|` `&&` 换行）一律不猜，返回 null 让前端回落到配置文案；目标太长就换不带名字
+ * 的氛围短句（硬塞会撑破气泡）；write / edit 的超大 arguments 不解析（动辄几百 KB）。
+ * @module dsh-pet/src/host/tool-detail
  */
 
 import { TASK_TEXT_MAX } from './work-status';
 
-/** 句子里可用的占位符：{target} 目标名 / {cmd} 命令名 */
+/** 句子里可用的占位符：{target} 目标名、{cmd} 命令名。 */
 type CopyLine = string;
 
-/** 从解析后的参数里取「目标」（文件名 / 搜索词 / 域名…）；取不到 → null */
+/** 从解析后的参数里取「目标」（文件名 / 搜索词 / 域名…）；取不到 → null。 */
 type TargetPicker = (args: Record<string, unknown>) => string | null;
 
-/** 只描述「怎么取目标」，**不含任何文案**（文案全部在下面的表里） */
+/** 只描述「怎么取目标」，不含任何文案（文案全部在下面的表里）。 */
 interface ToolRule {
   pick: TargetPicker;
   /**
-   * 目标是不是**路径**：只有路径才做「太长只留文件名」的压缩。
+   * 目标是不是路径：只有路径才做「太长只留文件名」的压缩。
    * 描述、搜索词、域名这类文本不该被 `/` 切开。
    */
   path?: boolean;
 }
 
-// ===================== 文案表（改文案只改这里） =====================
-
-/** 文件名/图片类：每句都带 {target} */
+/** 文件名/图片类：每句都带 {target}。 */
 const FILE_COPY: readonly CopyLine[] = ['翻翻 {target} 看看嘛', '{target} 里面写了啥呢', '我先瞅瞅 {target} 哈'];
 
-/** 写文件 */
+/** 写文件。 */
 const WRITE_COPY: readonly CopyLine[] = ['写点东西到 {target}', '{target} 马上写出来', '给 {target} 添点料'];
 
-/** 改文件 */
+/** 改文件。 */
 const EDIT_COPY: readonly CopyLine[] = ['{target} 得改改啦', '我来动动 {target} 哦', '{target} 这里要修一下'];
 
-/** 找文件 */
+/** 找文件。 */
 const GLOB_COPY: readonly CopyLine[] = ['{target} 都躲哪儿了呢', '找找 {target} 在不在', '{target} 藏在哪个角落呀'];
 
-/** 搜内容 */
+/** 搜内容。 */
 const GREP_COPY: readonly CopyLine[] = ['{target} 藏哪儿了呢', '搜搜 {target} 在哪', '哪儿有 {target} 呀'];
 
-/** 给人看文件 */
+/** 给人看文件。 */
 const PRESENT_COPY: readonly CopyLine[] = ['给你看 {target} 哦', '{target} 拿来给你瞧瞧', '喏，{target} 在这儿'];
 
-/** 学技能 */
+/** 学技能。 */
 const SKILL_COPY: readonly CopyLine[] = ['学个新本事 {target}', '{target} 这招得记住', '把 {target} 学起来'];
 
-/** 委派子任务 */
+/** 委派子任务。 */
 const SUBAGENT_COPY: readonly CopyLine[] = ['叫人搭把手：{target}', '让帮手去看看 {target}', '{target} 交给帮手了'];
 
-/** 一个工具的文案：3 句带 {target} 的说法 + 目标太长时的一句纯氛围兜底 */
+/** 一个工具的文案：3 句带 {target} 的说法 + 目标太长时的一句纯氛围兜底。 */
 interface ToolCopy {
   readonly lines: readonly CopyLine[];
-  /** 目标超过 TARGET_DISPLAY_MAX 时用：**不出现文件名 / 工具名**（气泡是氛围，不是信息面板） */
+  /** 目标超过 TARGET_DISPLAY_MAX 时用：不出现文件名与工具名（气泡是氛围，不是信息面板） */
   readonly short: CopyLine;
 }
 
-/** 工具 → 文案。**没列在这里的工具**走 UNKNOWN_TOOL_LINE。 */
+/** 工具 → 文案。没列在这里的工具走 UNKNOWN_TOOL_LINE。 */
 const TOOL_COPY: Readonly<Record<string, ToolCopy>> = {
   read: { lines: FILE_COPY, short: '翻翻代码看看' },
   read_image: {
@@ -105,16 +88,14 @@ const TOOL_COPY: Readonly<Record<string, ToolCopy>> = {
   },
 };
 
-/** 未知工具：只说一句氛围话，**不报工具名**（`str_replace_editor` 这种名字上屏很怪） */
+/** 未知工具：只说一句氛围话，不报工具名（`str_replace_editor` 这种名字上屏很怪）。 */
 const UNKNOWN_TOOL_LINE: CopyLine = '这工具是干嘛的';
 
-/** 兜底：没进表的命令（npm / python / node / tsc / eslint / docker…），短命令名会上屏 */
+/** 兜底：没进表的命令（npm / python / node / tsc / eslint / docker…），短命令名会上屏。 */
 const COMMAND_FALLBACK: readonly CopyLine[] = ['跑一下 {cmd} 咯', '{cmd} 跑起来了', '让 {cmd} 干点活'];
 
-/** 兜底：命令名本身太长（如 Get-NetTCPConnection）时用，不带名字 */
+/** 兜底：命令名本身太长（如 Get-NetTCPConnection）时用，不带名字。 */
 const COMMAND_NAME_TOO_LONG: CopyLine = '跑一个命令咯';
-
-// ---- 有明确语义的命令（键一律小写；别名共用同一组文案） ----
 
 const CD_COPY: readonly CopyLine[] = ['先把位置挪一挪', '切到那个目录去', '挪个地方继续干活'];
 const LS_COPY: readonly CopyLine[] = ['看看这儿都有啥', '这层都有什么东西', '翻翻这里有没有'];
@@ -126,7 +107,7 @@ const CP_COPY: readonly CopyLine[] = ['抄一份留着', '复制一份备用', '
 const CURL_COPY: readonly CopyLine[] = ['去问问接口有没有人', '敲敲门看看通不通', '请求一下那个地址'];
 const CHECKOUT_COPY: readonly CopyLine[] = ['换到那个分支瞧瞧', '切个分支看看', '换条路继续走'];
 
-/** 命令 / 「命令 子命令」→ 3 句候选（键一律小写） */
+/** 命令 / 「命令 子命令」→ 3 句候选（键一律小写，别名共用同一组）。 */
 const COMMAND_COPY: Readonly<Record<string, readonly CopyLine[]>> = {
   cd: CD_COPY,
   'set-location': CD_COPY,
@@ -169,9 +150,9 @@ const COMMAND_COPY: Readonly<Record<string, readonly CopyLine[]>> = {
 };
 
 /**
- * 语义已由别处表达、**不该**进气泡的工具：
- * `todo_write` 的文案本身就是气泡正文（写它等于自己盖自己）；`ask_user_question` 与
- * goal 系已有专门档位（waiting / success / error）；`exit_plan_mode` 是纯内部调度。
+ * 语义已由别处表达、不该进气泡的工具：
+ * `todo_write` 的文案本身就是气泡正文（写它等于自己盖自己）；`ask_user_question` 与 goal 系已有
+ * 专门档位（waiting / success / error）；`exit_plan_mode` 是纯内部调度。
  * 这些报出来不是重复就是噪音。
  */
 const SILENT_TOOLS: ReadonlySet<string> = new Set([
@@ -183,7 +164,7 @@ const SILENT_TOOLS: ReadonlySet<string> = new Set([
   'exit_plan_mode',
 ]);
 
-/** 取目标的方式（与文案表按工具名关联；pwsh 不在这里，它走命令表） */
+/** 取目标的方式（与文案表按工具名关联；pwsh 不在这里，它走命令表）。 */
 const TOOL_RULES: Readonly<Record<string, ToolRule>> = {
   read: { pick: fileTarget, path: true },
   read_image: { pick: fileTarget, path: true },
@@ -201,16 +182,14 @@ const TOOL_RULES: Readonly<Record<string, ToolRule>> = {
   present: { pick: filesTarget, path: true },
 };
 
-// ===================== 通用小工具 =====================
-
-/** 非空字符串（去首尾空白），否则 null —— 所有取参都先过它 */
+/** 非空字符串（去首尾空白），否则 null——所有取参都先过它。 */
 function str(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   return trimmed === '' ? null : trimmed;
 }
 
-/** 按候选顺序取第一个非空字符串：同名工具在不同版本里字段叫法可能不同（file_path / filePath / path） */
+/** 按候选顺序取第一个非空字符串：同名工具在不同版本里字段叫法可能不同（file_path / filePath / path）。 */
 function firstStr(args: Record<string, unknown>, keys: readonly string[]): string | null {
   for (const key of keys) {
     const value = str(args[key]);
@@ -219,12 +198,12 @@ function firstStr(args: Record<string, unknown>, keys: readonly string[]): strin
   return null;
 }
 
-/** 文件类工具：`file_path` 是主流，`path` 是部分工具的写法 */
+/** 文件类工具：`file_path` 是主流，`path` 是部分工具的写法。 */
 function fileTarget(args: Record<string, unknown>): string | null {
   return firstStr(args, ['file_path', 'filePath', 'path']);
 }
 
-/** 网页：给主机名就够（完整 URL 又长又带查询串，气泡放不下也没必要） */
+/** 网页：给主机名就够（完整 URL 又长又带查询串，气泡放不下也没必要）。 */
 function urlHost(args: Record<string, unknown>): string | null {
   const raw = str(args.url);
   if (raw === null) return null;
@@ -239,7 +218,7 @@ function urlHost(args: Record<string, unknown>): string | null {
   }
 }
 
-/** 网络搜索：`queries` 可能是数组（主流）或单数字符串，两种都认 */
+/** 网络搜索：`queries` 可能是数组（主流）或单数字符串，两种都认。 */
 function queryTarget(args: Record<string, unknown>): string | null {
   const queries = args.queries;
   if (Array.isArray(queries)) {
@@ -252,7 +231,7 @@ function queryTarget(args: Record<string, unknown>): string | null {
   return firstStr(args, ['queries', 'query']);
 }
 
-/** 展示文件：`files` 是 `[{ path, description }]`，取第一个的 path（没有就取 description） */
+/** 展示文件：`files` 是 `[{ path, description }]`，取第一个的 path（没有就取 description）。 */
 function filesTarget(args: Record<string, unknown>): string | null {
   const files = args.files;
   if (!Array.isArray(files)) return null;
@@ -271,10 +250,10 @@ function filesTarget(args: Record<string, unknown>): string | null {
  */
 const COMMAND_LIKE = /^[A-Za-z][A-Za-z\d_.-]+$/;
 
-/** 子命令长什么样：单词形态（`status` / `log` / `push`），不接受开关与路径 */
+/** 子命令长什么样：单词形态（`status` / `log` / `push`），不接受开关与路径。 */
 const SUBCOMMAND_LIKE = /^[A-Za-z][A-Za-z\d-]*$/;
 
-/** 复合命令：`;` `|` `&&` `||` 换行 一律不猜（引号内的竖线也会被判成复合，宁保守） */
+/** 复合命令：`;` `|` `&&` `||` 换行一律不猜（引号内的竖线也会被判成复合，宁保守）。 */
 const COMPOUND_COMMAND = /[;|]|&&|\|\||\r?\n/;
 
 /**
@@ -283,7 +262,7 @@ const COMPOUND_COMMAND = /[;|]|&&|\|\||\r?\n/;
  */
 const EDGE_CHARS = new Set('&.([{!@$^+:=,;|"\'`)]}>#');
 
-/** 剥掉词首词尾的边角字符 */
+/** 剥掉词首词尾的边角字符。 */
 function trimEdges(token: string): string {
   let start = 0;
   let end = token.length;
@@ -293,11 +272,10 @@ function trimEdges(token: string): string {
 }
 
 /**
- * 把命令行切成「词」：**引号内的整体算一个词**（`"C:\Program Files\node.exe"` 不会被空格劈开），
+ * 把命令行切成「词」：引号内的整体算一个词（`"C:\Program Files\node.exe"` 不会被空格劈开），
  * 引号本身丢弃，`;` / `|` 当分隔符。
  *
- * 这不是通用 shell 解析器，只为「找命令名」服务——所以只处理引号与分隔符，
- * 不解释变量、转义与管道语义。
+ * 这不是通用 shell 解析器，只为「找命令名」服务，所以只处理引号与分隔符，不解释变量、转义与管道。
  */
 function tokenizeCommand(command: string): string[] {
   const tokens: string[] = [];
@@ -324,20 +302,20 @@ function tokenizeCommand(command: string): string[] {
   return tokens.map(trimEdges).filter((token) => token !== '');
 }
 
-/** arguments 的解析上限（UTF-16 码元数）：超过就不解析（write / edit 会带上整个文件内容） */
+/** arguments 的解析上限（UTF-16 码元数）：超过就不解析（write / edit 会带上整个文件内容）。 */
 const MAX_ARGS_CHARS = 64 * 1024;
 
-/** 气泡里目标的展示上限（码点）：超过就只留文件名 */
+/** 气泡里目标的展示上限（码点）：超过就只留文件名。 */
 const TARGET_MAX = 22;
 
 /**
- * 目标上屏的**长度上限**（码点）：超过就整句换成该工具的氛围兜底。
+ * 目标上屏的长度上限（码点）：超过就整句换成该工具的氛围兜底。
  * 比 TARGET_MAX 小是有意的——路径压缩后仍超过这个数的（长文件名、长 grep 正则、长 query）
  * 硬塞进句子会撑破气泡（真实案例：`grep` 的 pattern 是 `WORK_STATE_GAP_MS|busyFlip|…`）。
  */
 const TARGET_DISPLAY_MAX = 20;
 
-/** 解析 tool/call 的 arguments（JSON 字符串；个别版本可能直接给对象）→ 参数对象；失败/超大 → null */
+/** 解析 tool/call 的 arguments（JSON 字符串；个别版本可能直接给对象）→ 参数对象；失败或超大 → null。 */
 function parseArgs(raw: unknown): Record<string, unknown> | null {
   if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
   if (typeof raw !== 'string' || raw === '' || raw.length > MAX_ARGS_CHARS) return null;
@@ -350,18 +328,18 @@ function parseArgs(raw: unknown): Record<string, unknown> | null {
   }
 }
 
-/** 按码点截断（与 ./work-status 的 currentTaskFromTodo 同口径：超长留 TASK_TEXT_MAX 个 + 省略号） */
+/** 按码点截断（与 ./work-status 的 currentTaskFromTodo 同口径：超长留 TASK_TEXT_MAX 个 + 省略号）。 */
 function clip(text: string): string {
   const points = Array.from(text);
   return points.length > TASK_TEXT_MAX ? `${points.slice(0, TASK_TEXT_MAX).join('')}…` : text;
 }
 
-/** 随机取一句（同一句连着出现很假，这里按调用随机） */
+/** 随机取一句（同一句连着出现很假，这里按调用随机）。 */
 function pickLine(lines: readonly CopyLine[]): CopyLine {
   return lines[Math.floor(Math.random() * lines.length)] ?? lines[0] ?? '';
 }
 
-/** 填占位符（`{target}` / `{cmd}` / `{tool}`）；未知占位符原样保留 */
+/** 填占位符（`{target}` / `{cmd}` / `{tool}`）；未知占位符原样保留。 */
 function fill(line: CopyLine, vars: Readonly<Record<string, string>>): string {
   let out = line;
   for (const [key, value] of Object.entries(vars)) out = out.split(`{${key}}`).join(value);
@@ -383,10 +361,9 @@ function compactTarget(raw: string, pathLike: boolean): string {
 /**
  * `pwsh` 的文案：按命令名（必要时加子命令）查表，查不到走兜底。
  *
- * - 复合命令（`;` `|` `&&` `||` 换行）→ **null**，让前端回落配置文案（无法判断真正在做什么）；
- * - `git log` 这类命中「命令 + 子命令」→ 用子命令文案；
- * - 只命中命令（`git`、`cd`）→ 用命令通用文案；
- * - 都没命中（`npm`、`python`、`node`…）→ 兜底「跑一下 npm 咯」（带命令名，至少知道在跑什么）。
+ * 复合命令 → null，让前端回落配置文案（无法判断真正在做什么）；`git log` 这类命中「命令 + 子命令」
+ * 用子命令文案，只命中命令（`git`、`cd`）用通用文案，都没命中（`npm`、`python`、`node`…）走兜底——
+ * 兜底带命令名，至少知道在跑什么。
  */
 function pwshDetail(args: Record<string, unknown> | null): string | null {
   const command = args === null ? null : str(args.command);
@@ -408,7 +385,7 @@ function pwshDetail(args: Record<string, unknown> | null): string | null {
 }
 
 /**
- * `tool/call` 事件 → 气泡详情；跳过 / 无法解析 / 无信息量 → null。
+ * `tool/call` 事件 → 气泡详情；跳过、无法解析、无信息量 → null。
  *
  * 返回值可以直接写进 `sections.workStatus.data.task`（长度 ≤ TASK_TEXT_MAX + 1）。
  */
@@ -429,7 +406,7 @@ export function toolDetailFromEvent(
   // workflow 这类整句不带对象的，直接给（不需要目标）
   if (!line.includes('{target}')) return clip(line);
   const target = args === null || rule === undefined ? null : rule.pick(args);
-  // 拿不到目标 → null，**不覆盖**气泡里已有的文案（todo 文案比半句话有信息量）
+  // 拿不到目标 → null，不覆盖气泡里已有的文案（todo 文案比半句话有信息量）
   if (target === null) return null;
   const shown = compactTarget(target, rule?.path === true);
   // 目标太长 → 换一句不带名字的氛围兜底（硬塞会撑破气泡，见 TARGET_DISPLAY_MAX 的说明）

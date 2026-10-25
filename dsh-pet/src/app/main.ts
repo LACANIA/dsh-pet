@@ -1,27 +1,9 @@
 /**
- * dsh-pet 独立应用主进程 —— 「双击就能跑」的桌宠应用入口（单进程）。
- *
- * 它把三件事装进**同一个 Electron 进程**（不再 spawn 第二个 electron.exe）：
- *   1. 本机 HTTP 服务：插件宿主半边注册的路由 + 独立模式那套「配置页 / 状态页」；
- *   2. 插件宿主半边：`apply()` 跑在 `src/standalone/context.ts` 造的最小伪 ctx 上；
- *   3. 桌面窗口：直接 `require` 现成的 `runtime/electron-helper/main.js`，窗口、托盘、拖拽、碰撞、
- *      DPI 补偿全部沿用桌面模式那一套，没有第二份实现。
- *
- * HTTP 面与 `dsh-pet-standalone`（CLI）保持一致，因为右键「打开 AI 设置」打开的就是这些地址：
- *   GET  /                      落地页（版本、配置路径、宠物清单）
- *   GET  /health                JSON 状态
- *   GET  /standalone-ai/        AI 配置页（HTML，与 CLI 同一份 settingsPage）
- *   GET/POST /standalone-ai/settings   读写配置（需 X-DSH-Pet-Token，令牌在地址的 #token= 里）
- *   POST /standalone-ai/test    连通性测试
- *   *    /dsh-pet-7340/...      插件路由（桌面窗口用，因此额外放行 CORS）
- *
- * 插件路由也检查令牌与 Host；本地 file 页面由主进程给请求附加访问凭证，
- * null 来源本身不授予权限。凭证不写入页面地址、渲染脚本或日志。
- *
- * 环境变量（应用自身用，不影响 DSH 内运行）：
- *   DSH_PET_IN_PROCESS=1  交给宿主半边：不 spawn helper、不下载 Electron（见 src/host/index.ts）
- *   DSH_PET_APP_MODE=1    交给 helper：托盘加「退出」、userData 独立
- *   DSH_PET_SITE_URL      交给 helper：右键「打开网站」用它（这里指向带令牌的配置页）
+ * dsh-pet 独立应用主进程：同一个 Electron 进程里装本机 HTTP 服务、插件宿主半侧与桌面 Helper。
+ * 只做启动装配与日志落盘：不实现路由（见 router.ts），不实现窗口/托盘/物理（复用桌面 Helper）。
+ * 依赖宿主半侧的 apply()、standalone 的配置与安全模块，以及 runtime/electron-helper/main.js。
+ * 始终成立：端口先于 Helper 就位（它在 ready 前就要用配置地址），令牌只经请求头与环境变量传递。
+ * @module dsh-pet/src/app/main
  */
 
 import { createRequire } from 'node:module';
@@ -42,7 +24,7 @@ import { installDesktopAuth, type DesktopSession } from './desktop-auth';
 import { startRouter } from './router';
 
 /**
- * `electron` 由 Electron 运行时提供，**不是本包的依赖**。只声明实际用到的成员：
+ * `electron` 由 Electron 运行时提供，不是本包依赖；只声明实际用到的成员。
  * 静态 `import 'electron'` 会让 `tsc --noEmit` 找不到类型而整仓变红。
  */
 interface WebContentsLike {
@@ -64,7 +46,7 @@ const { app, session } = createRequire(import.meta.url)('electron') as {
   session: { defaultSession: DesktopSession };
 };
 
-/** lib/app.js → 包根（与 helper-process.ts 的 packageRoot 同一口径：模块所在目录的上一级） */
+/** 包根目录：与 helper-process.ts 的 packageRoot 同一口径（模块所在目录的上一级） */
 const here = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(here, '..');
 const helperMain = join(packageRoot, 'runtime', 'electron-helper', 'main.js');
@@ -80,14 +62,15 @@ if (!locked) {
 }
 
 /**
- * 启动应用。`await` 在最外层：端口必须在 `require(helperMain)` 之前确定，因为 helper 在
- * `app.whenReady()` 里就要用 `DSH_PET_CONFIG_URL` / `DSH_PET_SITE_URL`；而它又必须在 ready
- * 之前被 require（内部有 `app.commandLine.appendSwitch`，ready 后再加不生效）。
+ * 启动应用。
+ *
+ * 外层必须 `await`：端口要在 `require(helperMain)` 之前确定（Helper 在 ready 回调里就要用配置地址），
+ * 而 Helper 又必须在 ready 之前被 require（内部有 `app.commandLine.appendSwitch`，ready 后再加不生效）。
  */
 async function boot(): Promise<void> {
-  // 独立应用没有控制台：插件日志、standalone 日志、以及同进程 helper/渲染端的 console 全部落盘。
-  // 原始 console 方法要**先快照**：包装后的 console 会转给文件 logger，而 logger 的 base 必须指向
-  // 原始方法，否则 logger → console → logger 无限递归。
+  // 独立应用没有控制台：插件日志、standalone 日志与同进程 Helper/渲染端的 console 全部落盘。
+  // 原始 console 方法要先快照——包装后的 console 会转给文件 logger，logger 的 base 必须指向原始方法，
+  // 否则 logger → console → logger 无限递归。
   const logFile = join(dshHomeDir(), 'dsh-pet', 'logs.txt');
   const rawConsole = {
     log: console.log.bind(console),
@@ -118,7 +101,7 @@ async function boot(): Promise<void> {
   const routes: RegisteredRoute[] = [];
   let port = 0;
 
-  // 与 CLI 同一套安全模型：令牌只经「配置页地址的 #token=」递到浏览器，不进日志
+  // 与 CLI 同一套安全模型：令牌只经「配置页地址的 #token=」递给浏览器，不进日志
   const security = createRequestSecurity();
   const ai = createStandaloneAi(dshHomeDir(), logger);
   const context = createStandaloneContext({
@@ -151,14 +134,14 @@ async function boot(): Promise<void> {
   // helper 读它决定建几个窗口；读不到时它会回落到单个默认窗口，首帧再由渲染端自校正
   process.env.DSH_PET_PETS = JSON.stringify(desktopPets());
 
-  // 同一个进程里跑 helper：建窗、托盘、IPC、碰撞全在它内部完成（CJS，需要 require）
-  // 渲染端日志必须转出来：打包后的应用没有控制台，渲染端报错只会表现成「窗口透明」。
+  // 同进程跑 Helper：建窗、托盘、IPC、碰撞都在它内部完成（CJS，需要 require）。
+  // 渲染端日志必须转出来——打包后的应用没有控制台，渲染端报错只会表现成「窗口透明」。
   app.on('web-contents-created', (_event, contents) => {
     contents.on('console-message', (_e, level, message, line, source) => {
       log(`渲染端[${level}] ${message} (${source}:${line})`);
     });
   });
-  // Register before helper's whenReady callback creates any file renderer.
+  // 必须早于 Helper 的 whenReady 回调建出 file 渲染页。
   void app.whenReady().then(() => {
     installDesktopAuth(
       session.defaultSession,
@@ -203,6 +186,7 @@ function desktopPets(): Array<{ id: string; size: number }> {
   }
 }
 
+/** 状态接口与落地页共用的数据源；配置读不出来时如实显示 0 只，不让页面 500。 */
 function status(port: number): Record<string, unknown> {
   const paths = configPathsFor(packageRoot, dshHomeDir());
   let pets: Array<Record<string, unknown>> = [];
@@ -222,7 +206,7 @@ function status(port: number): Record<string, unknown> {
   };
 }
 
-/** 落地页：取代以前的 `not found`。配置项只能改文件，真正的可视化配置在 /standalone-ai/。 */
+/** 落地页：配置项只能改文件，可视化配置在 /standalone-ai/（需令牌）。 */
 function landingPage(port: number): string {
   const info = status(port);
   const pets = (info.pets as Array<Record<string, unknown>>) ?? [];
@@ -254,6 +238,7 @@ function landingPage(port: number): string {
 </main></body></html>`;
 }
 
+/** HTML 转义：落地页拼字符串用。 */
 function escapeHtml(value: string): string {
   return value.replace(
     /[&<>"']/g,

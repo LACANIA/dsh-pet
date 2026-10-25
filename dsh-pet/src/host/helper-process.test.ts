@@ -226,7 +226,7 @@ test('Electron cache validation: an empty file enters the download path and repo
   t.mock.method(console, 'log', () => {});
   t.mock.method(console, 'warn', () => {});
   const logs: string[] = [];
-  // Invalid version plus a loopback-only mirror: this test must never download a real runtime.
+  // 非法版本 + 仅回环的镜像：这个用例绝不能真的下载运行时。
   const result = await ensureElectronDownload({
     version: 'invalid-version',
     mirror: 'http://127.0.0.1:1/',
@@ -346,7 +346,7 @@ describe('HelperProcess —— 退避/熔断的**接线**（纯函数之外，�
   }
 
   test('首次崩溃等待 base（默认 750ms），不是 2×base', async () => {
-    // 曾经是「先自增再算延迟」：计数 1 取 2^1 = 2×base，首延变成 1500ms，与注释/旧版固定 750ms 都不符
+    // 首延必须是 base：计数在算延迟前不能自增（否则计数 1 取 2^1 = 2×base，首延变成 1500ms）
     const logs = await runCrashLoop({ DSH_PET_RESTART_BASE_MS: '1' }, 20);
     const first = logs.find((l) => l.includes('restarting in'));
     assert.ok(first, '应有一条重启告警');
@@ -354,7 +354,7 @@ describe('HelperProcess —— 退避/熔断的**接线**（纯函数之外，�
   });
 
   test('DSH_PET_RESTART_MAX_FAILURES 真的接进判定：设 3 → 第 3 次就熔断', async () => {
-    // 曾经这个环境变量只出现在日志文案里，判定用的是 shouldCircuitBreak 的默认值 12
+    // DSH_PET_RESTART_MAX_FAILURES 必须接进判定：不能只出现在日志文案里、判定仍用默认值 12
     const logs = await runCrashLoop({ DSH_PET_RESTART_BASE_MS: '1', DSH_PET_RESTART_MAX_FAILURES: '3' }, 60);
     const tripped = logs.find((l) => l.includes('circuit breaker tripped'));
     assert.ok(tripped, '按用户设定的阈值应熔断');
@@ -444,8 +444,8 @@ describe('HelperProcess.stopAndWait —— 停止要等进程真正退出（issu
   });
 
   test('连 SIGKILL 都不退 → 宽限期后仍 resolve（绝不挂住配置保存）', async (t) => {
-    // FakeChild has no process handle to keep the event loop alive while
-    // production's unref'ed watchdogs wait. Advance both deadlines explicitly.
+    // FakeChild 没有真实进程句柄来撑住事件循环（生产的看门狗是 unref 的），
+    // 所以这里显式推进两个截止时间。
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const { fake, stop } = fakeHelper(20);
     let settled = false;
@@ -519,7 +519,7 @@ describe('HelperProcess failed spawn recovery', () => {
           const child = hp.start()!;
           const [error] = await once(child, 'error');
           assert.equal(error.code, code);
-          // Repair the configured executable before the existing backoff expires.
+          // 在既有退避到期前修好配置的可执行文件。
           options.command = process.execPath;
           await Promise.race([
             ready,

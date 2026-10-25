@@ -1,22 +1,17 @@
 /**
  * 桌面 helper「置顶看门狗」的判定 + 源码守卫。
  *
- * 背景（0.3.6 现场复现，Windows 双屏 + DSH 主窗最大化）：桌宠整只沉到 DSH 主窗下面，
- * 用户看到的是「宠物不见了」——进程活着、渲染正常（PrintWindow 抓得到宠物与气泡）、动画照跑，
- * 只是屏幕上没有；实测 z 序 DSH 主窗（普通窗）在桌宠窗之上，而桌宠窗的 `WS_EX_TOPMOST` 位仍为真。
+ * 背景：Windows 双屏 + DSH 主窗最大化时，桌宠整只沉到主窗下面——进程活着、渲染正常，只是看不见；z 序上普通窗压在桌宠窗之上，而桌宠窗的 `WS_EX_TOPMOST` 位仍为真。
  *
- * 根因形状：`WS_EX_TOPMOST` 只是样式位，**不等于**窗口在置顶带里。该位必须靠
- * `SetWindowPos(HWND_TOPMOST/HWND_NOTOPMOST)` 才能真正落带，直接写 `GWL_EXSTYLE` 只写位不落带；
- * 而 Electron 在 Windows 上翻转点击穿透走的就是 `SetWindowLong(GWL_EXSTYLE)` 读-改-写
- * （native_window_views.cc 的 `SetIgnoreMouseEvents`，桌宠每进出一次命中区 + 60ms 兜底轮询都会写），
- * 于是「位在、带不在」这个状态既可能出现、又查不出来。建窗时那次 `setAlwaysOnTop` 之后再无复查，
- * 于是外部一次 z 序扰动就能让桌宠永久隐身，直到 helper 重启。
+ * 根因形状：`WS_EX_TOPMOST` 只是样式位，不等于窗口在置顶带里。该位必须靠
+ * `SetWindowPos(HWND_TOPMOST/HWND_NOTOPMOST)` 才真正落带，直接写 `GWL_EXSTYLE` 只写位不落带；
+ * 而 Electron 在 Windows 上翻转点击穿透走的就是 `SetWindowLong(GWL_EXSTYLE)` 读-改-写，
+ * 于是「位在、带不在」既可能出现、又查不出来。建窗时那次 `setAlwaysOnTop` 之后再无复查，
+ * 一次外部 z 序扰动就能让桌宠永久隐身，直到 helper 重启。
  *
- * 本文件钉三件事：
- *   ① 判定规则：到点才重钉；隐藏/销毁/自检挂起期间不钉（这一拍被拦就下一拍补上）；
- *   ② 常量不变式：节拍必须快于重钉间隔，否则判定退化成"每拍都钉"；
- *   ③ 源码守卫：main.js 里必须真的按这套规则接线（Electron 起不来，只能读源码断言），
- *      且看门狗**只**重钉置顶，不得移动/缩放/显隐/抢焦点（那些是渲染端与其它通道的职责）。
+ * 本文件钉三件事：① 判定规则：到点才重钉；隐藏/销毁/自检挂起期间不钉（下一拍补上）；
+ * ② 常量不变式：节拍必须快于重钉间隔，否则退化成"每拍都钉"；③ 源码守卫：main.js 必须按这套
+ * 规则接线，且看门狗只重钉置顶，不得移动/缩放/显隐/抢焦点（那些是渲染端与其它通道的职责）。
  *
  * 用 Node 内置 test runner（node:test），不引入任何 npm 依赖。
  */

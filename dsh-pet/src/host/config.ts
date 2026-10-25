@@ -1,38 +1,12 @@
 /**
- * host 侧配置模块 —— 全项目唯一的配置读取入口与写盘出口。
+ * host 侧配置模块：插件唯一的配置读取入口与写盘出口。
  *
- * 角色：
- *   - readAllConfig()：读取 内置默认（assets/config.jsonc，绝对正确）+ 用户主配置
- *     （main-config.jsonc）+ 文件宠物（pet/<名>-config.json，一个文件一个条目），
- *     逐字段合并后返回 **绝对正确** 的完成品聚合：
- *       { main: {...}, test1: {...}, ... }
- *     每个条目都是对应配置文件的原文结构（字段名/位置/嵌套一律不动），且所有字段已填满。
- *   - saveUserConfig()：设置页写盘（PUT /config），白名单重建用户层 main-config.jsonc；
- *     与读取分离——写的是「可编辑层」，文件宠物永不回写、不进此模式。
- *   - syncUserConfigFromDefault()：设置页「同步」写盘（POST /config），把内置默认
- *     （assets/config.jsonc 原文，含注释）整份写入用户层——既是「恢复默认」，又直接给出
- *     一份可编辑的完整配置（不必再自己从包内复制）。合并结果与「没有用户层」等价。
+ * 不负责渲染与运行时状态；浏览器半侧的拍平逻辑在 src/shared/config.ts（本模块是 host 自包含实现，
+ * 不 import src/shared —— DSH 单文件加载约束）。
+ * 依赖内置默认 assets/config.jsonc、用户主配置 main-config.jsonc 与文件宠物目录 pet/。
+ * 必须始终成立：readAllConfig 的返回值绝对正确（字段填满、绝不残缺/非法），消费端零校验。
  *
- * 合并规则（唯一规则）：
- *   - 内置默认配置是唯一默认值来源（「代码里的配置绝对正确」）；
- *   - 覆盖文件写了 → 用自己的值；**没写 → 静默填内置默认值**（结构性常态，不告警——
- *     设置页写的用户层本就只含 pets + notificationsEnabled；文件宠物也可以写得很短）；
- *   - **对象字段也是整段替换**（`physics` / `eventsRefreshSec` / `whisperModel` … 都适用）：
- *     写了就整段用自己的，缺的子键**不会**从内置默认补回来——消费端各自兜底
- *     （如余额周期读不到就按 1800、碎碎念按 300）；
- *   - **显式写了但非法**（类型/结构/白名单外）→ 告警 + 填内置默认值
- *     （同一 文件+字段 进程内只告警一次，避免每请求刷屏；保证返回绝不出现残缺/非法值）；
- *   - **例外：全局默认**（GLOBAL_DEFAULT_KEYS 那 10 个「用户级成本/偏好/环境/节奏」字段）——
- *     文件宠物条目的基座取**用户层**（main-config.jsonc）而不是内置默认，即"设置页改一次，
- *     所有宠物都生效"；种类文件仍可在自己顶层覆盖（写了就用自己那份）；
- *   - 身份字段例外（无默认可填）：id 必须存在、全局唯一（缺失/重复/非法/冲突 →
- *     跳过该实例并告警）；name 缺失/空 → 按该宠物 id 处理并告警（既定规则，不继承默认名字）。
- *
- * 消费端契约：其他代码（路由/命令/碎碎念/对话/桌面）只消费 readAllConfig 的返回值，
- * 不做任何校验/兜底；浏览器与桌面通过 GET /dsh-pet-7340/config 拿到同一份成品。
- *
- * 本模块是 host 自包含实现（不 import src/shared —— DSH 单文件加载约束）；
- * 浏览器/桌面侧的对应纯逻辑（把成品拍平成渲染列表）在 src/shared/config.ts。
+ * @module dsh-pet/src/host/config
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -48,9 +22,8 @@ const CORNER_SET: ReadonlySet<string> = new Set(CORNERS);
 const PET_DISPLAYS = ['web', 'desktop', 'both', 'none'] as const;
 export const PET_DISPLAY_SET: ReadonlySet<string> = new Set(PET_DISPLAYS);
 
-/** font.family 白名单（预设 id）——**必须与 src/shared/fonts.ts 的 FONT_PRESETS 保持一致**：
- *  host 不能 import src/shared（见文件头注释的 DSH 单文件加载约束），这里是那份清单的自包含副本，
- *  所以加/删字体预设时两边都要改。 */
+/** font.family 白名单（预设 id）——必须与 src/shared/fonts.ts 的 FONT_PRESETS 保持一致：
+ *  host 不能 import src/shared，这里是那份清单的自包含副本，加/删字体预设时两边都要改。 */
 const FONT_FAMILY_SET: ReadonlySet<string> = new Set([
   'candy',
   'yahei',
@@ -66,35 +39,15 @@ const FONT_SIZE_MIN = 4;
 const FONT_SIZE_MAX = 200;
 
 /** id 禁用的字符（Windows 文件名保留符 + 控制字符，防配置值逃逸文件路径）。
- *  同时被 thumb 路由的 petId 校验复用：那里同样是"标识符不得当路径片段"。 */
-// eslint-disable-next-line no-control-regex
+ *  同时被 thumb 路由的 petId 校验复用：那里同样是「标识符不得当路径片段」。 */
+// eslint-disable-next-line no-control-regex -- 正则的用途就是拦 \x00-\x1f 控制字符（防配置值逃逸路径），去掉匹配等于放行
 export const ID_FORBIDDEN = /[\\/:\x00-\x1f]/;
 
 /**
- * 「全局默认 + 种类可覆盖」的顶层字段白名单 —— 用户层（main-config.jsonc）里写下的值会成为
- * **所有条目**的默认值；种类文件 `pet/<名>-config.json` 仍可在自己顶层覆盖（写了就用自己那份）。
- *
- * 判据：这几个是**用户级「成本 / 偏好 / 环境 / 节奏」参数**，不是「这个种类长什么样」——
- *   - `chatMemoryRounds`：带多少历史进上下文 = token 成本
- *   - `whisperModel` / `chatModel`：碎碎念 / 对话用哪个模型 = 成本与能力偏好
- *   - `whisperImageEnabled` / `chatImageEnabled`：要不要把表情包清单附进请求 = token 成本
- *   - `chatImageLimit`：对话那张清单**最多几张**——同属 token 成本（清单每条消息都附）
- *   - `eventsRefreshSec`：多久调一次模型 / 拉一次余额 = 成本与节奏。注意它内部两个键的**消费端**
- *     不同：`.whisper` 按宠物所属条目读（种类可覆盖）；`.balance` 只读 main 条目
- *     （余额数据一份 + host 只有一个定时器，架构上给不了每种类一个周期）
- *   - `physics`：拖拽抛掷手感；`petCollision` 更是**跨宠物**行为（相撞按动量守恒弹开），
- *     按种类分在语义上站不住：两只不同种类的宠物相撞时用谁的系数？
- *   - `confineToScreen`：多屏是用户环境 / 使用习惯，不是宠物属性
- *   - `font`：字体种类 / 字号 / 是否随宠物缩放是**看的人**的偏好，不是某个种类的属性——
- *     同一套字体偏好用在所有宠物（含 pet pack）才符合预期
- *
- * 不在名单里的顶层字段基座仍是**内置默认**：`whisperPrompt`（人设）、`memes`（表情包）、
- * `animations` / `animationWeights`（与素材根绑定）、`workStatusTexts`（文案）——一个种类一份
- * 动画池 / 一份人设 / 一个表情包目录，各写一份才是 pet pack 的意义。
- *
- * 例外：**人设有实例级覆盖**。`pets[].whisperPrompt`（可选）写了就取代所属条目顶层那一份，
- * 没写则回落条目——回落本身由消费端做（./persona 的 petPersona），合并不填生效值（见 petPersonaField 注释）。
- * 其余实例级字段仍是固定白名单（id/name/size/4 个开关/display/position + whisperPrompt）。
+ * 「全局默认 + 种类可覆盖」的顶层字段白名单：这些是用户级成本 / 偏好 / 环境 / 节奏参数
+ * （chatMemoryRounds、两个模型、两个配图开关与张数上限、eventsRefreshSec、physics、confineToScreen、font），
+ * 不是「这个种类长什么样」，所以用户层写一次应对所有条目生效；种类文件仍可在自己顶层覆盖。
+ * 人设是例外：实例级 pets[].whisperPrompt 优先，回落由消费端做（./persona 的 petPersona）。
  */
 const GLOBAL_DEFAULT_KEYS = [
   'physics',
@@ -160,15 +113,10 @@ function readJsonc(path: string): Record<string, unknown> | undefined {
 }
 
 /**
- * 读磁盘上的用户层原对象（JSONC 容忍——与读取路径 readAllConfig 共用同一份解析器）。
- *
- * 写路径必须用它：`PUT /config` 的「透传保留」要把用户手改的高级字段（physics /
- * whisperPrompt / animations / memes / ...）原样带回，而用户层可能是「同步」写入的
- * **带 // 注释的 config.jsonc 原文**。那里若用严格 `JSON.parse`，解析必然抛错、又被
- * catch 静默吞掉，existing 就成了 undefined —— 保存时白名单重建，高级字段全部丢失
- * （这正是「保存把用户精调配置抹掉」那次老 bug 的复发路径）。
- *
- * 文件不存在 / 损坏 → undefined（调用方按「无既有字段」处理，不阻塞保存）。
+ * 读磁盘上的用户层原对象（JSONC 容忍，与读取路径共用同一份解析器）。
+ * 写路径必须用它：PUT /config 的透传保留要把用户手改的高级字段原样带回，而用户层可能是带 // 注释
+ * 的 config.jsonc 原文；若用严格 JSON.parse，解析抛错被吞 → existing 变 undefined → 白名单重建
+ * → 高级字段全部丢失。文件不存在 / 损坏 → undefined。
  */
 export function readUserConfig(paths: ConfigPaths): Record<string, unknown> | undefined {
   const file = effectiveUserFile(paths);
@@ -176,14 +124,9 @@ export function readUserConfig(paths: ConfigPaths): Record<string, unknown> | un
 }
 
 /**
- * 用户层**存在但解析不了**（真损坏：语法错误，连 JSONC 剥注释都救不回来）。
- *
- * 用途：`PUT /config`（保存）的损坏预检。保存是「白名单重建」，一旦 existing 读不出来，
- * 文件里原有的内容（用户手写的 animations / physics / memes / ...）就会被整份丢掉——
- * 而且全程静默。所以宿主这里**先不写盘**，回 409 让设置页弹窗（取消 = 不动文件；
- * 确认 = 强行重建），绝不静默丢配置。
- *
- * 文件不存在 → false（没有东西可丢，正常首次保存）。
+ * 用户层存在但解析不了（真损坏：连 JSONC 剥注释都救不回来）。
+ * 用途：PUT /config 的损坏预检——保存是白名单重建，existing 读不出来会让原有内容被整份静默丢掉，
+ * 所以先不写盘、回 409 让设置页弹窗确认。文件不存在 → false。
  */
 export function userConfigUnparsable(paths: ConfigPaths): boolean {
   const file = effectiveUserFile(paths);
@@ -196,7 +139,7 @@ export interface ConfigPaths {
   defaultFile: string;
   /** ~/.dsh/dsh-pet/main-config.jsonc（用户主配置，可编辑层；JSONC——允许注释） */
   userFile: string;
-  /** 旧版路径 ~/.dsh/dsh-pet/main-config.json：读取回落 + 启动时迁移（见 migrateUserConfig） */
+  /** 旧路径 ~/.dsh/dsh-pet/main-config.json：读取回落 + 启动时迁移（见 migrateUserConfig） */
   legacyUserFile?: string;
   /** ~/.dsh/dsh-pet/pet（文件宠物目录） */
   petDir: string;
@@ -211,13 +154,9 @@ function effectiveUserFile(paths: ConfigPaths): string | undefined {
 }
 
 /**
- * 老用户一次性迁移：`main-config.json` → `main-config.jsonc`（**重命名**，内容一字不动）。
- *
- * 为什么改扩展名：用户层从「同步」起就是带 `//` 注释的 JSONC 原文，挂在 `.json` 名下名不副实
- * （编辑器会当严格 JSON 报错）。改成 `.jsonc` 后与包内默认 `config.jsonc` 同名同格式。
- *
- * 语义：新文件已存在 → 什么都不做（绝不用旧文件覆盖新文件）；旧文件不存在 → 什么都不做；
- * 重命名失败（占用/权限）→ 静默放过，读取侧对旧路径有回落，功能不受影响。
+ * 老用户一次性迁移：main-config.json → main-config.jsonc（重命名，内容一字不动）。
+ * 为什么改扩展名：用户层从「同步」起就是带 // 注释的 JSONC 原文，挂在 .json 名下名不副实。
+ * 新文件已存在 → 什么都不做（绝不用旧文件覆盖新文件）；重命名失败静默放过，读取侧有回落。
  */
 export function migrateUserConfig(paths: ConfigPaths, log?: (message: string) => void): boolean {
   const legacy = paths.legacyUserFile;
@@ -254,15 +193,10 @@ function scanPetFiles(petDir: string): PetFileEntry[] {
 }
 
 /**
- * 按条目 key（= 文件名前缀 = 素材根）定位**文件宠物**的实际文件与磁盘原对象。
- *
- * 用途：写路径（POST /pet-display）改某只文件宠物的 display 时，既要写回**它自己的**配置文件，
- * 也要拿该文件的 existing 去做「透传保留」——否则文件里用户手改的 whisperPrompt / animations /
- * memes 等非白名单字段会被 saveUserConfig 的白名单重建整份抹掉（与 main 层 readUserConfig
- * 同一套语义，见其注释里的老 bug 说明）。
- *
- * 文件名可能是 `<前缀>-config.json` 或 `.jsonc`（与 scanPetFiles 同一套规则，不在这里重复写死
- * 扩展名——写错扩展名就会新建一个空配置，用户那只宠物反而"没被改到"）。前缀不存在 → undefined。
+ * 按条目 key（= 文件名前缀 = 素材根）定位文件宠物的实际文件与磁盘原对象。
+ * 写路径（POST /pet-display）改文件宠物的 display 时，既要写回它自己的配置文件，也要拿该文件的
+ * existing 做透传保留，否则手改的 whisperPrompt / animations / memes 会被白名单重建抹掉。
+ * 扩展名不写死（.json 或 .jsonc），写错就会新建一个空配置；前缀不存在 → undefined。
  */
 export function readPetConfigEntry(
   paths: ConfigPaths,
@@ -296,7 +230,7 @@ function animationsValid(a: unknown): boolean {
   for (const pool of Object.values(evEntries)) {
     if (!Array.isArray(pool) || pool.length === 0) return false;
     for (const slot of pool) {
-      // 档位槽位：单个动画名（原行为）或候选数组（档内随机抽 1，见 shared/pickers pickSlot）；
+      // 档位槽位：单个动画名或候选数组（档内随机抽 1，见 shared/pickers pickSlot）；
       // 空字符串 / 空数组 / 成员为空串的数组均非法
       if (typeof slot === 'string') {
         if (slot.length === 0) return false;
@@ -350,8 +284,8 @@ function physicsValid(value: unknown): boolean {
 }
 
 /** font 段校验：family ∈ 预设白名单、size 为区间内的有限数字、followPet 为布尔。
- *  与 physics 同口径：**整段校验**——任一子键缺失/非法即整段非法（告警 + 取默认），
- *  不做「缺子键逐个补默认」；对象字段一律整段替换（见文件头合并规则）。 */
+ *  与 physics 同口径：整段校验——任一子键缺失/非法即整段非法（告警 + 取默认），
+ *  不做「缺子键逐个补默认」；对象字段一律整段替换。 */
 function fontValid(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const f = value as Record<string, unknown>;
@@ -362,8 +296,8 @@ function fontValid(value: unknown): boolean {
 }
 
 /** whisperModel / chatModel 段校验：{ provider, model } 两个字符串，
- *  **要么都留空（= 跟随当前对话的模型）要么都非空**——只填一半（选了服务商没选模型，或反之）
- *  会拼出"用 A 家的模型名去问 B 家"这种必然失败的组合，按非法处理（告警 + 取默认）。 */
+ *  要么都留空（= 跟随当前对话的模型）要么都非空——只填一半会拼出「用 A 家的模型名去问 B 家」
+ *  这种必然失败的组合，按非法处理（告警 + 取默认）。 */
 function modelSelectionValid(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const m = value as Record<string, unknown>;
@@ -433,10 +367,7 @@ function topFieldValid(key: string, value: unknown): boolean {
 
 /**
  * eventsRefreshSec 段校验：事件名 → 间隔秒（正的有限数字）。
- *
- * 只校验「写下的每个值都合法」，**不**要求键集合与内置默认一致——这个字段和别的顶层字段
- * 一样是**整段替换**：缺的键就是缺（消费端各自兜底 1800 / 300），多写的键原样保留
- * （不再像旧的逐键深合并那样静默丢弃不认识的键）。空对象合法（等于全走消费端兜底）。
+ * 这是整段替换字段：缺的键由消费端各自兜底（1800 / 300），多写的键原样保留；空对象合法。
  */
 function eventsRefreshSecValid(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -448,14 +379,9 @@ function eventsRefreshSecValid(value: unknown): boolean {
 }
 
 /**
- * 文件宠物条目的合并基座：内置默认 + 白名单字段改用**用户层**的值。
- *
- * 为什么：那 9 个字段是用户级成本/偏好/环境/节奏参数，不是种类属性——用户在设置页改一次，
- * 期望所有宠物（含 pet pack）都生效。没有这一步，文件宠物只能拿到内置默认值，
- * 于是"设置页写着全局、实际只影响主宠物"（见 GLOBAL_DEFAULT_KEYS 的判据）。
- *
- * 语义仍是「种类可覆盖」：种类文件顶层写了自己的值 → 走 overlay 覆盖（mergeEntry 负责）。
- * 用户层写了但非法的值直接跳过（main 条目那边合并时已告警过一次，这里不再重复刷屏）。
+ * 文件宠物条目的合并基座：内置默认 + 白名单字段改用用户层的值。那 9 个字段是用户级成本/偏好/
+ * 环境/节奏参数，不是种类属性，用户在设置页改一次应让所有宠物（含 pet pack）都生效。
+ * 语义仍是「种类可覆盖」：种类文件顶层写了自己的值就走 overlay 覆盖；用户层写了但非法的值直接跳过。
  */
 function packBase(
   base: Record<string, unknown>,
@@ -600,12 +526,10 @@ function mergePet(
       marginX: petNumber(ownPos.marginX, basePos.marginX, -Infinity, label, 'position.marginX', id),
       marginY: petNumber(ownPos.marginY, basePos.marginY, -Infinity, label, 'position.marginY', id),
     },
-    // 实例级人设（可选）：只放行**非空字符串**；没写 / 空串 / 纯空白 / null → 该键不出现在结果里
+    // 实例级人设（可选）：只放行非空字符串；没写 / 空串 / 纯空白 / null → 该键不出现在结果里
     // （回落由消费端做：./persona 的 petPersona 取不到实例级就取条目顶层）；非字符串 → 告警 + 忽略。
-    //
-    // **这里刻意不填"生效值"**：合并器的契约是"拍平用户写了什么"，而人设的默认值是**所属条目那一份**，
-    // 不是某个常量。一旦在这里把条目人设填进每只实例，/pet-display（拿合并结果 → saveUserConfig 写回）
-    // 就会把"跟随条目"固化成每只实例的显式覆盖——之后用户改条目人设，这些实例不再跟着变。
+    // 这里刻意不填生效值：人设的默认值是所属条目那一份，一旦填进每只实例，/pet-display 写回就会把
+    // 「跟随条目」固化成显式覆盖——之后用户改条目人设，这些实例不再跟着变。
     ...petPersonaField(p.whisperPrompt, label, id),
   };
 }
@@ -626,9 +550,8 @@ function petPersonaField(own: unknown, label: string, id: string): { whisperProm
 }
 
 /**
- * 唯一读取函数：内置默认 + 用户主配置 + 文件宠物逐字段合并后的完成品聚合。
- * 返回 { main: {...}, test1: {...}, ... } —— 每个条目都是原文件结构且所有字段已填满，
- * 消费端直接读，不做任何校验/兜底。每次调用重新读文件：修改配置刷新/重启即生效。
+ * 唯一读取函数：内置默认 + 用户主配置 + 文件宠物逐字段合并后的成品聚合。
+ * 每个条目都是原文件结构且字段已填满，消费端直接读；每次调用重新读文件，改配置即刻生效。
  */
 export function readAllConfig(paths: ConfigPaths): Record<string, Record<string, unknown>> {
   const base = readJsonc(paths.defaultFile);
@@ -646,7 +569,7 @@ export function readAllConfig(paths: ConfigPaths): Record<string, Record<string,
   out.main = mergeEntry(base, mainOverlay, 'main-config.jsonc', basePets, seenIds);
 
   // 文件宠物条目：pet/<名>-config.json，一个文件一个条目（key = 文件名前缀 = 素材根）。
-  // 基座 = 内置默认，但白名单字段（用户级成本/偏好/环境）取**用户层**——「全局默认 + 种类可覆盖」。
+  // 基座 = 内置默认，但白名单字段（用户级成本/偏好/环境）取用户层——「全局默认 + 种类可覆盖」。
   const filePetBase = packBase(base, mainOverlay);
   for (const file of scanPetFiles(paths.petDir)) {
     const parsed = readJsonc(file.path);
@@ -684,16 +607,10 @@ export function findPetInstance(
 }
 
 /**
- * 保存用户层（PUT /config）：更新 main-config.jsonc，接受可编辑字段（pets + 全局开关：
- * notificationsEnabled / whisperImageEnabled / chatImageEnabled / confineToScreen / trayEnabled + physics
- * + whisperModel / chatModel + chatMemoryRounds + chatImageLimit）。
- * pets 内除 id/name/size/四个开关/display/position 外，还接可选的 `whisperPrompt`（实例级人设；
- * 空串 = 删除覆盖，回落条目）。
- * 编辑语义：**非白名单顶层字段（whisperPrompt / eventsRefreshSec / memes 等）从
- * `existing`（当前磁盘上的用户文件原对象）原样透传保留**——
- * 用户手动编辑的精调配置不会被设置页保存抹掉（旧实现是纯白名单重建，会整体覆盖丢失）。
- * 白名单字段同理只在请求体**真的传了**时才算白名单：没传就走透传，不会被抹成默认值。
- * 非法 → 返回 null（宿主回 400）。与读取分离——文件宠物永不回写、不在本模式内。
+ * 保存用户层（PUT /config）：接受 pets + 全局开关 + physics / font / 两个模型 / 对话参数。
+ * 非白名单顶层字段（whisperPrompt、eventsRefreshSec、memes 等）从 existing 原样透传保留——
+ * 用户手动编辑的精调配置不会被设置页保存抹掉；白名单字段也只在请求体真的传了时才算白名单。
+ * 非法 → 返回 null（宿主回 400）。与读取分离：文件宠物永不回写。
  */
 export function saveUserConfig(
   raw: unknown,
@@ -707,7 +624,7 @@ export function saveUserConfig(
   for (const p of arr) {
     if (!p || typeof p !== 'object') return null;
     const pp = p as Record<string, unknown>;
-    // Match mergePet's canonical identity before checking uniqueness or writing to disk.
+    // 与 mergePet 的身份规则一致：先 trim，再判唯一性，最后写盘。
     const id = typeof pp.id === 'string' ? pp.id.trim() : '';
     // 有意过滤文件名非法字符（Windows 保留符 + 控制字符），防止配置值逃逸 main-config.jsonc 路径
     if (!id || id.length > 64 || ID_FORBIDDEN.test(id) || seenIds.has(id)) return null;
@@ -727,7 +644,7 @@ export function saveUserConfig(
     const workStatusEnabled = pp.workStatusEnabled;
     if (workStatusEnabled !== undefined && typeof workStatusEnabled !== 'boolean') return null;
     // 宠物固定（随机链不再抽「转向 / 移动」两档）：与上面两个开关同语义——可选，
-    // 传了必须是布尔，没传则走下面的读取侧默认值（内置默认 false = 保持原行为）。
+    // 传了必须是布尔，没传则走下面的读取侧默认值（内置默认 false = 不固定）。
     const fixedEnabled = pp.fixedEnabled;
     if (fixedEnabled !== undefined && typeof fixedEnabled !== 'boolean') return null;
     const display = String(pp.display ?? '');
@@ -739,7 +656,7 @@ export function saveUserConfig(
     const marginY = Number(pos.marginY);
     if (!Number.isFinite(marginX) || !Number.isFinite(marginY)) return null;
     // 实例级人设（可选）：非空字符串才落盘（trim 后写）；空串/纯空白 = 不写该键——
-    // 落盘结果是"这只宠物没有自己的覆盖"，读取侧（./persona 的 petPersona）自动回落到所属条目。
+    // 落盘结果是「这只宠物没有自己的覆盖」，读取侧（./persona 的 petPersona）自动回落到所属条目。
     // 也就是说：清空输入框 + 保存 = 删除覆盖，而不是写一个空人设。
     // 非字符串（且非 undefined/null）与其他字段同口径：整包 400，不静默丢用户输入。
     const rawPersona = pp.whisperPrompt;
@@ -804,7 +721,7 @@ export function saveUserConfig(
     model: String(v.model).trim(),
   });
   // 白名单可编辑字段：pets 来自请求体，其余（四个全局开关 / physics / 两个模型 /
-  // 对话历史条数）同样只在请求体**真的传了**时才写（未传则走下面的透传保留，不凭空造值）
+  // 对话历史条数）同样只在请求体真的传了时才写（未传则走下面的透传保留，不凭空造值）
   const outConfig: { pets: unknown[]; [key: string]: unknown } = { pets: out };
   if (ne !== undefined) outConfig.notificationsEnabled = ne;
   if (cse !== undefined) outConfig.clickSoundEnabled = cse;
@@ -847,20 +764,11 @@ export function saveUserConfig(
 }
 
 /**
- * 同步用户层（POST /config，设置页「同步」）：把内置默认配置**原文**写入用户主配置文件。
- *
- * 为什么是"复制原文"而不是"删除用户层"（旧实现）：删掉之后用户手上没有配置文件，
- * 想手改高级字段（physics / whisperPrompt / animations / memes / ...）就得自己从包内
- * assets/config.jsonc 复制一份——这一步是死的、每次都要做。这里直接把那份文件（含全部
- * 中文注释、全部字段）落到用户配置路径上：既等价于恢复默认（合并结果 = 内置默认），
- * 又让用户拿到一份开箱可编辑的完整配置。
- *
- * 注释无害：读取侧统一走 readJsonc（stripJsonc 剥注释），带注释写入照样能读。
- *
- * 注意（调用方要在 UI 上讲清楚）：文件一旦生成即成为**显式覆盖层**——用户层写了什么就
- * 覆盖内置默认的对应字段，所以插件升级改了内置默认后，这个文件里的旧值仍会继续生效。
- *
- * 默认文件缺失/目录不可写 → 直接抛（宿主回 500）：绝不静默留下半个配置文件。
+ * 同步用户层（POST /config，设置页「同步」）：把内置默认配置原文写入用户主配置文件。
+ * 复制原文而不是删除用户层：既等价于恢复默认（合并结果 = 内置默认），又让用户拿到一份含全部
+ * 注释、开箱可编辑的完整配置。读取侧统一走 stripJsonc，带注释写入照样能读。
+ * 注意：文件一旦生成即成为显式覆盖层，插件升级改了内置默认后，文件里的旧值仍会继续生效。
+ * 默认文件缺失 / 目录不可写 → 直接抛（宿主回 500），绝不静默留下半个配置文件。
  */
 export function syncUserConfigFromDefault(paths: ConfigPaths): void {
   const raw = readFileSync(paths.defaultFile, 'utf8');
@@ -869,13 +777,9 @@ export function syncUserConfigFromDefault(paths: ConfigPaths): void {
 }
 
 /**
- * 对话记忆截取：从消息列表里取尾部 `rounds` 轮（1 轮 = 1 问 1 答 → 2 条）。
- *
- * 为什么单独抽一个函数：`rounds = 0` 表示「不带历史」。若直接写 `messages.slice(-rounds * 2)`，
- * 会踩 JS 的 `-0` 陷阱——`-0 === 0`，`slice(-0)` 返回**整个数组**而不是空数组，
- * 于是「关掉历史」反而变成「带全部历史」（用户实测：设 0 后问生日，10 秒后仍答得出）。
- * 这里显式分支：0 → 空列表；> 0 → 截尾部。`rounds` 由合并器保证为非负有限数，
- * 负数/NaN 兜底按 0 处理（不产出荒谬的 slice 行为）。
+ * 对话记忆截取：取尾部 rounds 轮（1 轮 = 1 问 1 答 → 2 条）。
+ * 不能写 messages.slice(-rounds * 2)：rounds = 0 时 -0 === 0，slice(-0) 返回整个数组，
+ * 「关掉历史」反而变成「带全部历史」。这里显式分支：0 → 空列表，> 0 → 截尾部。
  */
 export function sliceMemoryRounds<T>(messages: T[], rounds: number): T[] {
   return rounds > 0 ? messages.slice(-Math.floor(rounds) * 2) : [];

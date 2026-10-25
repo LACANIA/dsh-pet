@@ -1,23 +1,11 @@
 #!/usr/bin/env node
 /**
- * dsh-pet 独立模式入口 —— 不打开 DSH 也能养桌宠。
+ * 独立模式入口：不启动 DSH，直接在本机运行桌宠。
  *
- * 它把三件事串起来（每一步都复用插件自己的实现，没有第二份业务逻辑）：
- *   1. `./context` 造一个伪 Cordis ctx，把插件的宿主半边（`src/host/index.ts` 的 `apply`）跑起来；
- *   2. `./server` 起一个真正的 `node:http` 服务，把 `apply` 注册的 prefix handler 接上去
- *      （路由表仍然只有插件那一份）；
- *   3. 插件自己的 `launchHelper` 因此照常探测 Electron、按配置拉起透明置顶小窗，
- *      并与宿主经 bridge 管道通信 —— 与 DSH 内运行完全同一条路径。
- *
- * 用法：
- *   npx dsh-pet-standalone              # 插件装好后直接跑（package.json 的 bin）
- *   npm run standalone                  # 仓库里跑（先安装依赖并 npm run build）
- *   node lib/standalone.js --port 3081
- *   node lib/standalone.js --check      # 只体检，不开窗口
- *
- * 独立模式的边界：动画、物理拖拽、右键菜单、多开、自定义素材与宠物种类全部可用；
- * 余额、碎碎念、对话、系统通知依赖 DSH 的凭证/模型/会话，在独立模式下明确不可用
- * （结构化失败 + 日志，不假装成功）。详见 README 的「独立运行（不打开 DSH）」一节。
+ * 负责把伪 ctx、本机 HTTP 服务与桌面 Helper 串成一条启动路径，并处理收尾与退出码。
+ * 不实现路由、配置读取或窗口逻辑，这些都复用插件与宿主半侧的实现。
+ * 必须始终成立：服务先监听再 apply，所有退出入口共用同一套收尾流程。
+ * @module dsh-pet/src/standalone/cli
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,12 +27,12 @@ import {
 import { configPathsFor, describePets, isDesktopVisible, parseArgs, USAGE } from './options';
 import { listenStandaloneServer } from './server';
 
-/** 启动独立模式：先起服务拿到端口，再 `apply`（插件据此拼桌面 Helper 的 configUrl） */
+/** 启动独立模式：先起服务拿到端口，再 apply。 */
 async function run(logger: StandaloneLogger, options: { port: number }): Promise<void> {
   const home = dshHomeDir();
   const paths = configPathsFor(packageRoot, home);
 
-  // 预检：包内默认配置读不到时宿主半边必然每请求失败；早给可操作的诊断，别让用户对着空桌面猜
+  // 包内默认配置缺失时宿主半侧每个请求都会失败，先给可操作的诊断。
   if (!existsSync(paths.defaultFile)) {
     logger.error(
       `包内默认配置缺失：${paths.defaultFile}。若你是在直接跑源码（包根被解析成了 src/），` +
@@ -55,9 +43,8 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
   }
 
   const routes: RegisteredRoute[] = [];
-  // /shutdown 的回调要在服务构造时给出去，而停机函数要在服务之后定义：
-  // 用一个可替换的转发器解耦（服务构造时只拿到"将来会是谁"）。桌面托盘「退出」也走它，
-  // 这样两条退出入口共用同一套收尾（context.dispose → 停 Helper → 关服务 → exit 0）。
+  // /shutdown 的回调要在建服务时交出，而收尾函数要在服务之后定义：
+  // 用可替换的转发器解耦，让服务构造时只拿到「将来会是谁」。
   let forwardShutdown: (reason: string) => void = () => {};
   const portRef = { value: options.port };
   const ai = createStandaloneAi(home, logger);
@@ -68,10 +55,10 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
     routes,
     ai,
     authenticatedUrl: security.authenticatedUrl,
-    // 托盘「退出」→ 宿主路由 POST /dsh-pet-7340/quit → 这里 → 与 POST /shutdown 同一条收尾。
+    // 托盘退出与 POST /shutdown 走同一条收尾路径。
     shutdown: (reason) => forwardShutdown(reason),
   });
-  // 停机函数要在服务之后定义（见上方 forwardShutdown 的说明）。
+  // 收尾函数要在服务之后定义（见 forwardShutdown 的说明）。
   const server = await listenStandaloneServer({
     routes,
     logger,
@@ -108,7 +95,7 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info(`收尾（${reason}）…`);
-    // 先释放插件注册的 effect（停桌面 Helper、清周期定时器），再关服务
+    // 先释放插件注册的 effect（停 Helper、清周期定时器），再关服务。
     try {
       await context.dispose();
     } finally {
@@ -129,7 +116,7 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
   process.on('SIGINT', () => requestShutdown('SIGINT'));
   process.on('SIGTERM', () => requestShutdown('SIGTERM'));
 
-  // 起插件宿主半边：路由表、状态仓、桌面 Helper（含 bridge 管道）都在这一句里
+  // 这一句里注册路由表、状态仓与桌面 Helper（含 bridge 管道）。
   apply(context.ctx);
 
   let pets: Record<string, unknown>[] = [];
@@ -167,7 +154,7 @@ async function run(logger: StandaloneLogger, options: { port: number }): Promise
   }
 }
 
-/** CLI 入口 */
+/** CLI 入口，返回进程退出码。 */
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2));
   if ('error' in parsed) {
@@ -180,19 +167,17 @@ async function main(): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  // 日志同时落盘（单文件、按大小截断）：独立模式常常没有终端，只写 stdout 等于丢失。
-  // 插件 apply() 会复用这个 logger（ctx.logger 带 isFileLogger 标记），不会再开第二个写同一文件。
+  // 独立模式常常没有终端，日志必须同时落盘；插件会复用同一个 logger。
   const logger = createStandaloneLogger({ file: join(dshHomeDir(), 'dsh-pet', 'logs.txt') });
-  // 纯模块（config/chat/whisper）没有 ctx.logger，靠默认出口落盘
+  // 纯模块没有 ctx.logger，靠默认出口落盘。
   setDefaultLogger(logger);
   if (options.check) return runCheck(logger);
   await run(logger, options);
   return 0;
 }
 
-// 本文件就是可执行入口（package.json 的 bin 指向构建产物 lib/standalone.js），
-// 因此无条件启动：不做 import.meta.main / argv[1] 比较之类的守卫 ——
-// import.meta.main 要 Node 24+，而 argv[1] 比较在 pnpm 的 bin 符号链接下会判错。
+// 本文件就是 bin 指向的可执行入口，因此无条件启动；
+// import.meta.main 需要 Node 24+，而 argv[1] 比较在 pnpm 的 bin 符号链接下会判错。
 main()
   .then((code) => {
     if (code !== 0) process.exit(code);

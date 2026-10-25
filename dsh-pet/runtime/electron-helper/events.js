@@ -1,36 +1,32 @@
 /**
- * dsh-pet desktop helper —— 事件联动（余额 / 碎碎念 / 广播 / 工作状态）。
+ * 桌面 Helper 的事件联动：余额、碎碎念、第三方点播与工作状态的展示与轮询。
  *
- * 展示与 tick 回调经 PetSprite.prototype 挂载（运行时可解析，顺序无碍）；
- * startLoops 是全部轮询的组装入口（boot 后调用）。依赖 constants.js / sprite.js。
+ * 展示与 tick 回调挂在 PetSprite.prototype 上（运行时解析，加载顺序无碍）；startLoops 是全部轮询的
+ * 唯一入口，boot 成功后调用。不负责动画播放与气泡渲染本身（见 sprite.js）。依赖 constants.js / sprite.js。
+ *
+ * @module dsh-pet/runtime/electron-helper/events
  */
 'use strict';
 
-// ---- 工作状态联动（DSH 会话状态，每只宠物按 workStatusEnabled 门控；容器 1s 轮询，ts 变化才递增 tick）----
-// 气泡驻留语义与浏览器一致：thinking/working/result/waiting（"事情还没完"）常驻直到状态切走；
-//   success/error（"这事结束了"）10s 自动收起；state=null（空闲/回合被打断）收起气泡回待机。
-// 动画循环语义：进行中档位循环播（switchTo once=false），终态档位播一遍回 idle 链；
-//   回空闲时把正在循环的那段改成"播完即停"（见下面空闲分支），否则 ended 永不触发、链回不去。
+// 工作状态联动：容器每秒轮询 /state，counter 变化才递增 tick，各宠物按 workStatusEnabled 门控。
+// 气泡驻留：thinking/working/result/waiting 常驻到状态切走，success/error 10s 自动收起，state=null 收起。
+// 动画：进行中档位循环播，终态播一遍回 idle 链；回空闲时把正在循环的那段改成「播完即停」。
 PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
   if (!this.pet.workStatusEnabled) return; // 未启用工作状态联动 -> 该宠物完全免疫（与浏览器一致）
   if (tick === 0 || tick === this.prevWorkTick) return;
   this.prevWorkTick = tick;
-  // 占用锁（issue #122 第 4 项）：锁生效时不响应工作状态——它是**自动**来源（任务事件驱动），
-  // 没有"用户手动要"这条路。判在 tick 消费**之后**：占用期间的变化当过去了，解冻时由
-  // applyFreeze 的 resumeWorkStatusAnim() 重新对齐**当前**状态，所以不会停在旧档位上。
-  // 宿主侧不挡这个全局段：sections.workStatus 是所有宠物共用一份，宿主"跳过写入"会连带静音
-  // 别的宠物（issue #122 要的是"只控制指定 main"），所以按宠物在渲染端忽略。
+  // 占用锁：锁生效时不响应工作状态——它是自动来源（任务事件驱动），没有「用户手动要」这条路。
+  // 判在 tick 消费之后：占用期间的变化当过去了，解冻时由 applyFreeze 重新对齐当前状态。
+  // 宿主侧不挡这个全局段：sections.workStatus 是所有宠物共用一份，跳过写入会连带静音别的宠物。
   if (this.frozen) return;
   const state = snapshot && snapshot.state ? snapshot.state : null;
-  this.workState = state; // 当前工作状态：互动/事件动画播完恢复档位循环用（与浏览器 workStatusRef 同用途）
+  this.workState = state; // 当前工作状态：互动/事件动画播完恢复档位循环用
   const stateChanged = this.prevWorkState !== state;
   this.prevWorkState = state;
   if (!state) {
-    // 回空闲：把正在**循环播**的进行中档位动画改成"播完即停"（与浏览器 src/client/pet.ts 的空闲分支
-    // 同一处修复）。进行中档位走 switchTo(name, false)（el.loop=true、el.onended=null），ended 永不
-    // 触发；而这里不切动画（原设计"由常规动画链回待机"），链因此拿不到推进信号 —— 宠物会一直卡在
-    // 那段工作动画上。只把当前段改成播完即停：它结束后走 handleEnded → resumeWorkStatusAnim() 返回
-    // false → playIdle；工作期间的原生 loop 不受影响。
+    // 回空闲：把正在循环播的进行中档位动画改成「播完即停」。进行中档位走 switchTo(name, false)
+    // （loop=true、onended=null），ended 永不触发；这里不切动画，链就拿不到推进信号，
+    // 宠物会卡在那段工作动画上。只改当前段：它结束后走 handleEnded → playIdle。
     if (S.poolIncludes(this.animations.events?.workStatus ?? [], this.anim)) {
       const frontEl = this.front === 0 ? this.videoA : this.videoB;
       if (frontEl) {
@@ -57,7 +53,7 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
     console.error('[dsh-pet] work-status 档位索引越界：state=' + state + ' idx=' + idx);
     return;
   }
-  const name = S.pickSlot(slot, this.anim); // 数组槽位档内随机抽 1，且避开当前正播动画（避免连续重复，与浏览器一致）
+  const name = S.pickSlot(slot, this.anim); // 数组槽位档内随机抽 1，避开当前正播动画（与浏览器一致）
   console.log(
     '[dsh-pet] ' +
       new Date().toTimeString().slice(0, 8) +
@@ -71,8 +67,7 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
       name,
   );
   this.stopMove();
-  // 气泡文本：任务详情（todo/write 提供）优先，否则从条目级 workStatusTexts[档位]（数组）随机抽一句；
-  // 整字段/整档缺失 = 不弹文本，只播动画（与浏览器同一语义）。
+  // 气泡文本：任务详情优先，否则从条目级 workStatusTexts[档位] 随机抽一句；整档缺失则只播动画。
   const textGroup = Array.isArray(this.pet.workStatusTexts) ? this.pet.workStatusTexts[idx] : undefined;
   const configuredText =
     Array.isArray(textGroup) && textGroup.length > 0
@@ -80,9 +75,7 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
       : undefined;
   this.workText = (snapshot && snapshot.task) || configuredText || null;
   const terminal = state === 'success' || state === 'error';
-  // 气泡点亮/收起只在状态变化时动作：同状态后续 tick（todo 文案更新、其它会话事件搅动 ts）
-  // 不重新点亮**已自动收起的终态气泡**——否则"任务完成"的气泡会被后续 ts 变化反复弹回（Bug 2，
-  // 与浏览器 workBubbleOn 同一语义）。
+  // 气泡点亮/收起只在状态变化时动作：同状态后续 tick 不重新点亮已自动收起的终态气泡，否则会被反复弹回。
   if (stateChanged) {
     this.workOn = true;
     if (this.workTimer !== null) window.clearTimeout(this.workTimer);
@@ -94,30 +87,28 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
       : null; // 非终态：常驻，不设自动收起
   }
   this.renderBubble();
-  // 循环语义（与浏览器 setOnce 一致）：终态播一遍回 idle；非终态多候选档位播一遍 →
-  // ended 由 sprite.handleEnded 轮换到下一候选（长时间状态不单段重复）；非终态单候选档位无限循环。
+  // 循环语义：终态播一遍回 idle；非终态多候选档位播一遍 → ended 轮换到下一候选；
+  // 非终态单候选档位无限循环。
   const rotating = !terminal && Array.isArray(slot) && slot.length > 1;
   if (terminal || rotating) this.playOnce(name);
   else this.switchTo(name, false); // 进行中循环播（单动画/单候选档位）
 };
 
-// ---- 余额事件（自动轮询按 balanceEnabled 门控，手动请求无条件；档位与气泡内容来自 shared） ----
+// 余额事件：自动轮询按 balanceEnabled 门控，手动请求无条件。
 // manual = 这次刷新是用户主动要的（右键「查看余额」/ `/balance` 命令）：不受开关限制，一律给答复。
 PetSprite.prototype.onBalanceTick = function onBalanceTick(state, tick, manual) {
   if (!this.pet.balanceEnabled && !manual) return; // 自动轮询受开关门控；手动无条件通过（与浏览器一致）
   if (tick === 0 || tick === this.prevTick) return;
   this.prevTick = tick;
-  // 占用锁（issue #122 第 4 项）：锁生效时**不看自动余额**（那是宠物自己的行为）；**手动**请求照常
-  // （用户右键「查看余额」/ `/balance` 命令——用户交互优先）。判在 tick 消费之后：占用期间这一拍
-  // 就当过去了，解冻后不补播（事件是瞬时的）。
+  // 占用锁：锁生效时不看自动余额（那是宠物自己的行为），手动请求照常（用户交互优先）。
+  // 判在 tick 消费之后：占用期间这一拍就当过去了，解冻后不补播（事件是瞬时的）。
   if (this.frozen && !manual) return;
   this.showBalanceNow(state, manual);
 };
 
-// 余额不可用（服务商未登记 / 缺凭证 / 抓取失败）：只弹**文字说明**气泡，不播档位动画
-// （非 ok 没有百分比语义，档位动画无从映射）。显隐/定时与成功路径同一套（10s 自动消失）；
-// 不 stopMove——本次没有动画要抢前台，宠物没必要停下漫游。
-// 门控：自动轮询要求 balanceEnabled；**手动请求无条件弹**（用户问了就该有答复，包括"服务商不支持"这件事）。
+// 余额不可用（服务商未登记 / 缺凭证 / 抓取失败）：只弹文字说明气泡，不播档位动画。
+// 显隐与定时和成功路径同一套；不 stopMove——本次没有动画要抢前台。
+// 门控：自动轮询要求 balanceEnabled，手动请求无条件弹（包括「服务商不支持」这件事）。
 PetSprite.prototype.showBalanceNotice = function showBalanceNotice(state, manual) {
   if (!this.pet.balanceEnabled && !manual) return; // 自动轮询受开关门控；手动无条件通过
   if (this.frozen && !manual) return; // 占用锁：自动来源不看；手动照常（用户问了就得有答复）
@@ -135,14 +126,11 @@ PetSprite.prototype.showBalanceNotice = function showBalanceNotice(state, manual
   }, BUBBLE_DURATION_MS);
 };
 
-// ---- 碎碎念 / 命令气泡 / 对话回复 / 清空（**四合一**）：不再各自轮询 ----
-// 改造前这里是两个循环（startWhisperLoop 按 eventsRefreshSec.whisper 轮询 /whisper、
-// startBroadcastLoop 1s 轮询 /broadcast）。现在三者都写进 S 的 pets.<id>.say，由上面的
-// /state 统一轮询分发到对应宠物（见 applySayLeaf）——本窗口只装一只宠物，按 id 命中即可。
+// 碎碎念 / 命令气泡 / 对话回复 / 清空走同一条通道：都写进 S 的 pets.<id>.say，
+// 由 /state 统一轮询分发到对应宠物（见 applySayLeaf）——本窗口只装一只宠物，按 id 命中即可。
 
-// 收起说话气泡（POST /bubble/clear 的落点）。**只动气泡**：正在播的动画、余额气泡、
-// 工作状态气泡都不碰——气泡与动作是两把锁、分别释放（issue #122 第 5 条）。
-// 与浏览器端 clearWhisperBubble 同一语义。
+// 收起说话气泡（POST /bubble/clear 的落点）。只动气泡：正在播的动画、余额气泡、
+// 工作状态气泡都不碰——气泡与动作是两把锁、分别释放。与浏览器端 clearWhisperBubble 同一语义。
 PetSprite.prototype.clearWhisper = function clearWhisper() {
   if (this.whisperTimer !== null) window.clearTimeout(this.whisperTimer);
   this.whisperTimer = null;
@@ -153,16 +141,11 @@ PetSprite.prototype.clearWhisper = function clearWhisper() {
   this.renderBubble();
 };
 
-// 碎碎念展示（本宠物）：随机抽 events.whisper 动画 + 弹文本气泡（与余额同一套定时语义）
-// image：host 随机抽定的配图名称（未开配图/池为空则空串，与浏览器端同一契约）
-// url：配图的另一种形态——第三方自带的完整地址（POST /broadcast 的 url 参数，issue #122 第 1 条）。
-//   与 image **二选一**（host 判定层保证），由字段名区分，不靠嗅探。
-// duration / anim：POST /broadcast 的两个新参数（issue #122 第 5 条）。两者**互相独立**：
-//   - anim === false 时整段跳过动画联动——不查池、不换源，也不 stopMove()
-//     （stopMove 属于"开始播这段动画"的一部分，不是弹气泡的副作用）。
-//     于是配置里缺 events.whisper 时，只弹气泡这条路照样走得通。
-//   - duration === 0 表示"这一条不显示"：**不动当前已在显示的气泡**
-//     （要收起它请用 POST /bubble/clear，两件事不重叠）。
+// 碎碎念展示（本宠物）：随机抽 events.whisper 动画 + 弹文本气泡（与余额同一套定时语义）。
+// image 是 host 随机抽定的配图名；url 是第三方自带的完整地址：两者二选一（host 判定层保证），
+// 由字段名区分、不靠嗅探。anim === false 时整段跳过动画联动（不查池、不换源、不 stopMove），
+// 于是缺 events.whisper 时只弹气泡也走得通。duration === 0 表示这一条不显示，且不动当前气泡
+// （要收起请用 POST /bubble/clear，两件事不重叠）。
 PetSprite.prototype.showWhisper = function showWhisper(text, image, url, duration, anim) {
   let name = null;
   if (anim !== false) {
@@ -204,12 +187,9 @@ PetSprite.prototype.showWhisper = function showWhisper(text, image, url, duratio
   }, duration ?? BUBBLE_DURATION_MS);
 };
 
-// 余额展示（气泡 + 档位动画）：周期轮询与菜单点播共用同一展示路径，视觉/行为严格一致。
-// 两条门控分得很清楚：
-//  - 弹气泡：手动请求（manual）**无条件**弹——用户问了就得有答复，哪怕这只宠物关了 balanceEnabled、
-//    哪怕服务商没有百分比语义（纯余额金额也照样显示）；自动轮询则要求"有内容可展示"：
-//    内置形态要有百分比依据，**custom 形态不看百分比**（内容由第三方设计，percent 只是可选的档位驱动）。
-//  - 档位动画：只属于启用余额的宠物，且要有百分比依据（关掉开关的宠物不该因为被点一次菜单就突然演一遍）。
+// 余额展示（气泡 + 档位动画）：周期轮询与菜单点播共用同一展示路径，视觉与行为严格一致。
+// 弹气泡：手动请求无条件弹（哪怕关了 balanceEnabled、哪怕没有百分比语义）；自动轮询要求有内容可展示，
+// custom 形态不看百分比。档位动画只属于启用余额的宠物，且必须有百分比依据，关掉开关的点菜单也不演。
 PetSprite.prototype.showBalanceNow = function showBalanceNow(state, manual) {
   if (!state || !state.ok) return;
   const p = S.balancePercent(state);
@@ -245,13 +225,9 @@ PetSprite.prototype.showBalanceNow = function showBalanceNow(state, manual) {
   this.playOnce(name);
 };
 
-// 点余额气泡：切到下一页（与浏览器 src/client/bubble.ts 同一套语义：末页回第一页）。
-// 页数由 balancePageCount 决定：内置 windows 是 收起/展开 两页，custom 是 views.length 页。
-// 两件事一起做：
-//  - 淡出 → 换内容 → 淡入：先在 .is-fading 里把 opacity 降到 0，250ms 后才重绘内容，
-//    否则内容会在半透明时被替换 = 看得见的硬切；
-//  - 重置 10s 气泡定时器：不重置的话，第 8 秒才点开就只剩 2 秒，"看完整信息"这个目的就落空了。
-// 命中区由 renderBubble 末尾的 syncInputBusy() 重报（is-clickable 变化会连带控件矩形变化）。
+// 点余额气泡：切到下一页（末页回第一页），页数由 balancePageCount 决定。
+// 淡出 → 换内容 → 淡入（250ms 后才重绘，否则内容会在半透明时被替换 = 硬切）；同时重置 10s 定时器，
+// 否则第 8 秒才点开就只剩 2 秒。命中区由 renderBubble 末尾的 syncInputBusy() 重报。
 PetSprite.prototype.toggleBalanceDetail = function toggleBalanceDetail() {
   if (!this.balanceClickable()) return;
   this.balanceViewIndex = (this.balanceViewIndex + 1) % this.balancePageCount();
@@ -269,11 +245,10 @@ PetSprite.prototype.toggleBalanceDetail = function toggleBalanceDetail() {
   }, BUBBLE_DURATION_MS);
 };
 
-// ---------- 轮询组装（容器统一拉取/触发，与浏览器 PetMulti 同一套路径；boot 成功后调用） ----------
+// 轮询组装：容器统一拉取与触发，与浏览器端同一套路径。
 
-// 余额不可用 → 文字说明气泡（周期轮询与手动 /balance 触发共用这一条路径；判定在 shared，与浏览器同一份）：
-// explicit=true（手动触发）一律弹——用户问了就该有答复，包括"服务商不支持"这件事；
-// 自动轮询仅在原因（含服务商）变化时弹一次，避免每 30 分钟反复刷同一句话。
+// 余额不可用 → 文字说明气泡（周期轮询与手动 /balance 共用这一条路径，判定在 shared）：
+// explicit（手动触发）一律弹；自动轮询只在原因（含服务商）变化时弹一次，避免反复刷同一句话。
 function applyBalanceNotice(state, explicit) {
   const notice = S.decideBalanceNotice(state, balanceNoticeKey, explicit);
   balanceNoticeKey = notice.key;
@@ -284,9 +259,8 @@ function applyBalanceNotice(state, explicit) {
   }
 }
 
-// ---------- 统一轮询（GET /state，长轮询）：与浏览器同一份数据来源与渲染入口 ----------
+// 统一轮询（GET /state，长轮询）：与浏览器同一份数据来源与渲染入口。
 // 每个叶子 = { counter, data }：首拉只记基线（不渲染），之后 counter 变了才渲染。
-// 各功能逐个接入，旧的独立轮询循环随迁随删。
 let stateBaseline = null;
 /** 我手里这份 S 的版本号（undefined = 首拉，不带参数 → 立刻拿全量） */
 let stateSince;
@@ -308,9 +282,7 @@ function applyBalanceLeaf(leaf) {
   }
 }
 
-/** 说话叶子 → 对应宠物播说话动画 + 气泡（碎碎念/命令气泡/对话回复/清空四合一）。
- *  `kind: 'clear'`（POST /bubble/clear）= 收起气泡；其余 = 弹一个气泡。
- *  petId 由路径解析出来（pets.<id>.say）；本窗口只装一只宠物，按 id 命中即可。 */
+/** 说话叶子 → 对应宠物播说话动画 + 气泡。`kind: 'clear'` = 收起气泡，其余 = 弹一个气泡。 */
 function applySayLeaf(petId, leaf) {
   const said = S.readSay(leaf);
   if (!said) return;
@@ -329,15 +301,10 @@ function applyWorkStatusLeaf(leaf) {
   for (const s of sprites) s.onWorkTick(snap, workTick);
 }
 
-/** 点播动画叶子 → 对应宠物播该动画（其他插件经 POST /anim 写进 S）。
- *  两种形态（issue #122 第 1 条）：
- *    name = 池内名字，复用**右键菜单同一个处理函数** onMenuAction，所以镜像修正 / 移动类走真实
- *      位移 / 其余播一遍的语义与菜单点一下完全一致，这里不重写一遍；
- *    url  = 第三方自带的完整地址，**不走 onMenuAction**（裸地址没有菜单语义），只换源播一次。
- *  `facing`（可选）= 调用方显式指定的朝向：**换源之前**赋给 sprite——switchTo 是在 onReady 里按
- *  this.facing 贴 scaleX(-1) 的，晚一步就赶不上这一趟。没给就一个字都不动（保持宠物当前朝向，
- *  而不是回落 left）；给了就跳过"文字类动画点播前强制朝左"那条修正（显式值优先）。
- *  petId 由路径解析出来（pets.<id>.anim）；本窗口只装一只宠物，按 id 命中即可。 */
+/** 点播动画叶子 → 对应宠物播该动画。
+ *  name 复用右键菜单同一个处理函数（镜像修正、移动类走真实位移），url 是第三方完整地址、
+ *  只换源播一次。facing 必须在换源之前赋给 sprite——switchTo 在 onReady 里按它贴 scaleX(-1)。
+ *  没给 facing 就保持宠物当前朝向；给了则跳过「文字类动画点播前强制朝左」的修正。 */
 function applyAnimLeaf(petId, leaf) {
   const hit = S.readAnim(leaf);
   if (!hit) return;
@@ -351,9 +318,7 @@ function applyAnimLeaf(petId, leaf) {
   }
 }
 
-/** 位置指令叶子 → 对应宠物挪过去（其他插件经 POST /position 写进 S）。
- *  复用 sprite.moveToCenter（instant / spring / line 三条路都在那儿），与 /anim 同一族：只分发，
- *  不重写运动学。petId 由路径解析出来（pets.<id>.position）；本窗口只装一只宠物，按 id 命中即可。 */
+/** 位置指令叶子 → 对应宠物挪过去；复用 sprite.moveToCenter，只分发、不重写运动学。 */
 function applyPositionLeaf(petId, leaf) {
   const hit = S.readPosition(leaf);
   if (!hit) return;
@@ -362,8 +327,7 @@ function applyPositionLeaf(petId, leaf) {
   }
 }
 
-/** 抛掷指令叶子 → 对应宠物按给定角度/力度飞出去（其他插件经 POST /throw 写进 S）。
- *  初速换算在 shared（S.throwVelocity），下游全是既有抛掷物理（重力/反弹/摩擦/落地 Q 弹）。 */
+/** 抛掷指令叶子 → 按角度/力度飞出去；初速换算在 shared，下游全是既有抛掷物理。 */
 function applyThrowLeaf(petId, leaf) {
   const hit = S.readThrow(leaf);
   if (!hit) return;
@@ -372,10 +336,8 @@ function applyThrowLeaf(petId, leaf) {
   }
 }
 
-/** 占用锁叶子 → 对应宠物冻结 / 解冻（其他插件经 POST /lock 写进 S，issue #122 第 4 项）。
- *  与上面四个**指令**不同，这是**状态**：sprite 读它决定要不要冻结自己（随机链停、暂停自播、
- *  忽略自动来源），并按叶子里的 expiresAt **自己**定时解除——宿主侧过期是懒判的，不会推"锁没了"。
- *  petId 由路径解析（pets.<id>.lock）；本窗口只装一只宠物，按 id 命中即可。 */
+/** 占用锁叶子 → 对应宠物冻结/解冻。它不是指令而是状态：sprite 自己按 expiresAt 定时解除，
+ *  因为宿主侧过期是懒判的、不会推「锁没了」。 */
 function applyLockLeaf(petId, leaf) {
   const hit = S.readLock(leaf);
   if (!hit) return;
@@ -384,14 +346,14 @@ function applyLockLeaf(petId, leaf) {
   }
 }
 
-/** 第三方菜单快照叶子 → 灌进各宠物（右键菜单据此拼「更多」）。
- *  与上面那些"指令"不同，这是**当前状态**：注册/覆盖时写一次，所有窗口共用同一份快照。 */
+/** 第三方菜单快照叶子 → 灌进各宠物（右键菜单据此拼「更多」）。它是当前状态、不是事件，
+ *  注册与覆盖时写一次，所有窗口共用同一份快照。 */
 function applyMenuLeaf(leaf) {
   const items = S.readMenuItems(leaf ? leaf.data : null, 'desktop');
   for (const s of sprites) s.menuItems = items;
 }
 
-/** 跑一拍 /state。返回 true = "按长轮询命中"（宿主支持长轮询，可以立刻再请求） */
+/** 跑一拍 /state。返回 true = 按长轮询命中（宿主支持长轮询，可以立刻再请求）。 */
 async function pollStateOnce() {
   try {
     const s = await S.fetchState(
@@ -405,7 +367,7 @@ async function pollStateOnce() {
     if (stateLongPoll) stateSince = s.counter;
     if (stateBaseline === null) {
       stateBaseline = S.flattenCounters(s); // 首拉：只记基线，不渲染（避免启动/重载时重放旧气泡）
-      // 第三方菜单项是**当前状态**不是事件：首拉就要装上，否则 helper 重启后要等下次注册才出现
+      // 第三方菜单项是状态而不是事件：首拉就要装上，否则 helper 重启后要等下次注册才出现
       applyMenuLeaf(s.sections ? s.sections.menu : null);
       return true;
     }
@@ -415,7 +377,7 @@ async function pollStateOnce() {
       else if (change.path === 'sections.workStatus') applyWorkStatusLeaf(change.leaf);
       else if (change.path === 'sections.menu') applyMenuLeaf(change.leaf);
       else if (change.path.startsWith('pets.') && change.path.endsWith('.say')) {
-        // 宠物 id **允许含点号**：按前缀/后缀切片，绝不 split('.')
+        // 宠物 id 允许含点号：按前缀/后缀切片，绝不 split('.')
         applySayLeaf(change.path.slice('pets.'.length, -'.say'.length), change.leaf);
       } else if (change.path.startsWith('pets.') && change.path.endsWith('.anim')) {
         // 点播动画：同样按前缀/后缀切片（counter 每次写入都递增，连点两次也会分发两次）
@@ -427,7 +389,7 @@ async function pollStateOnce() {
         // 抛掷指令：同上
         applyThrowLeaf(change.path.slice('pets.'.length, -'.throw'.length), change.leaf);
       } else if (change.path.startsWith('pets.') && change.path.endsWith('.lock')) {
-        // 占用锁：同上切片，绝不 split('.')。它是**状态**不是指令（见 applyLockLeaf）
+        // 占用锁：同上切片，绝不 split('.')。它是状态而不是指令（见 applyLockLeaf）
         applyLockLeaf(change.path.slice('pets.'.length, -'.lock'.length), change.leaf);
       }
     }
@@ -442,10 +404,9 @@ function startLoops() {
   if (loopsStarted) return;
   loopsStarted = true;
 
-  // 统一轮询：**自调度长轮询**（请求 → 处理 → 立刻再请求）。宿主在版本没变时挂起，所以
-  // 空闲时是 1 请求/秒（与改造前一致），叶子一变立刻收到——不需要"前端动作后叫醒一拍"了
-  // （动作端点都会写叶子 → 版本变 → 挂着的这一拍自己就返回）。本窗口只装一只宠物，
-  // 所以每个窗口各跑一份；全局计数器意味着任意写入会唤醒所有窗口（有意为之，见 host ./state）。
+  // 统一轮询是自调度的长轮询（请求 → 处理 → 立刻再请求）：宿主在版本没变时挂起，空闲时
+  // 1 请求/秒，叶子一变立刻收到。本窗口只装一只宠物，所以每个窗口各跑一份；全局计数器意味着
+  // 任意写入会唤醒所有窗口（有意为之）。
   const stateLoop = async () => {
     const hit = await pollStateOnce();
     setTimeout(() => void stateLoop(), hit && stateLongPoll ? 0 : 1000);

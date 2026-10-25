@@ -1,13 +1,13 @@
 /**
  * Command Code 用量的契约测试（provider id `commandcode`，控制面 `/alpha/*`）。
  *
- * 背景：Command Code 的用量在官方 CLI 使用的**未文档化控制面**路由上。插件把它的 5h / 周 / 月
+ * 背景：Command Code 的用量在官方 CLI 使用的未文档化控制面路由上。插件把它的 5h / 周 / 月
  * 三个窗口映射成与 opencode 同构的三窗口用量，展示层因此共用同一套「取最紧迫窗口」逻辑。
  *
  * 本文件把三件事钉住：
  *   ① 真实 GOAT 报文的解析（含 `resetAt: 0` 这类占位值不得被当成 1970 年重置时间）；
  *   ② 失败口径：必填字段缺失/非法一律抛错（→ fetch-error），可选信息一律省略，绝不伪造 0；
- *   ③ 网络链路：四个接口的**顺序与 query**、Bearer 注入、凭证 ref、订阅接口失败不致命。
+ *   ③ 网络链路：四个接口的顺序与 query、Bearer 注入、凭证 ref、订阅接口失败不致命。
  *
  * 用 Node 内置 test runner（node:test），不引入任何 npm 依赖；fetch 用手写 stub 顶替（只跑假数据，不联网）。
  */

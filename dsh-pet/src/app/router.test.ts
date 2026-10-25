@@ -78,7 +78,7 @@ test('app rejects untrusted file origins and hosts while authenticated desktop c
     assert.equal(media.status, 200);
     await media.text();
     assert.equal(calls, 2);
-    // The file-origin exception does not apply to the AI settings endpoints.
+    // 文件来源例外不适用于 AI 设置端点。
     assert.equal(
       (await fetch(server.base + '/standalone-ai/settings', { headers: { ...token, Origin: 'null' } })).status,
       403,

@@ -1,5 +1,10 @@
 /**
  * 本插件所有 LLM 调用的调用身份，以及「没有正文」时的原因解析。
+ *
+ * 不负责发请求、选模型与拼消息——那是生成侧各模块自己的事；这里只给所有调用两样共享的东西：
+ * 一个稳定的调用身份，和一句把流终止原因翻成人话的文案。
+ * 必须始终成立：身份字符串不变，适配器靠它生成服务商载体，对端可能据此拒绝请求。
+ * @module dsh-pet/src/host/llm-call
  */
 
 /**
@@ -10,8 +15,8 @@ export const PET_CALL_IDENTITY = 'dsh-pet';
 
 /**
  * 没有正文时，按流终止原因给出要展示的原因。
- * @param finish - `BlockAssembler.finish`（dsh-llm 把适配器抛错折进终止块，不在流里抛出）
- * @returns 上层拼在「对话失败：」之后的文案
+ * @param finish - 流终止块（`BlockAssembler.finish`；dsh-llm 把适配器抛错折进这里，不在流里抛出）。
+ * @returns 上层拼在「对话失败：」之后的文案。
  */
 export function noTextReason(finish: unknown): string {
   const { kind, failure } = (finish ?? {}) as { kind?: unknown; failure?: unknown };
